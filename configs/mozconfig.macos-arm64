@@ -1,0 +1,18 @@
+# Native build on Apple Silicon (GitHub-hosted arm64 runner / Apple Silicon Mac).
+# 与 configs/mozconfig.macos-x64（Linux 交叉编译 Intel）对应；这里假设编译器就在 arm64 本机。
+
+ac_add_options --target=aarch64-apple-darwin
+ac_add_options --enable-bootstrap
+ac_add_options --enable-application=browser
+ac_add_options --enable-release
+ac_add_options --disable-crashreporter
+ac_add_options --disable-backgroundtasks
+ac_add_options --disable-tests
+ac_add_options --disable-debug
+ac_add_options --disable-updater
+ac_add_options --disable-update-agent
+ac_add_options --disable-default-browser-agent
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-aarch64-apple-darwin
+mk_add_options MOZ_CRASHREPORTER=0
+mk_add_options MOZ_TELEMETRY_REPORTING=0

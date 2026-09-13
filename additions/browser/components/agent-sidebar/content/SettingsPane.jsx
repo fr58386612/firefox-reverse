@@ -34,6 +34,10 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
   const [customUrl, setCustomUrl] = useState(initial.baseUrl || "");
   const [customProtocol, setCustomProtocol] = useState(initial.protocol || "openai");
   const [customReasoningEffort, setCustomReasoningEffort] = useState(initial.reasoningEffort || "auto");
+  // 二开 M3/M4：上下文窗口(kTokens，0=按模型名自动) + 模型能力开关(视觉/视频)，随 profile 保存。
+  const [contextWindowK, setContextWindowK] = useState(initial.contextWindowK || 0);
+  const [vision, setVision] = useState(!!initial.vision);
+  const [video, setVideo] = useState(!!initial.video);
   const [confirmTools, setConfirmTools] = useState(store.getConfirmTools ? store.getConfirmTools() : false);
   const [promptCacheMode, setPromptCacheMode] = useState(store.getPromptCacheMode ? store.getPromptCacheMode() : "auto");
   const [promptCacheTtl, setPromptCacheTtl] = useState(store.getPromptCacheTtl ? store.getPromptCacheTtl() : "default");
@@ -67,6 +71,9 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
     setCustomUrl(p.baseUrl || "");
     setCustomProtocol(p.protocol || "openai");
     setCustomReasoningEffort(p.reasoningEffort || "auto");
+    setContextWindowK(p.contextWindowK || 0);
+    setVision(!!p.vision);
+    setVideo(!!p.video);
     setFetchedModels([]);
     setFetchMsg("");
     setManual(false);
@@ -151,6 +158,9 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
         baseUrl: isCustom ? customUrl : "",
         protocol: isCustom ? customProtocol : "openai",
         reasoningEffort: isCustom ? customReasoningEffort : "auto",
+        contextWindowK: Number(contextWindowK) > 0 ? Math.round(Number(contextWindowK)) : 0,
+        vision,
+        video,
       };
       if (store.updateModelProfile) {
         p = store.updateModelProfile(profileId, values);
@@ -326,6 +336,19 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
           </select>
         </label>
         <label className="settings-pane__field">
+          上下文窗口（千 tokens）
+          <input
+            type="number"
+            min="0"
+            max="2000"
+            step="1"
+            value={contextWindowK || ""}
+            placeholder="留空 = 按模型名自动判断"
+            onChange={e => { setContextWindowK(e.target.value); setStatus(""); }}
+          />
+        </label>
+        <span className="settings-pane__hint">填模型官方窗口大小（如 200k 填 200）。上下文超过窗口的 80% 时自动摘要压缩历史；留空则按模型名启发式分档。</span>
+        <label className="settings-pane__field">
           长会话策略
           <select value={contextStrategy} onChange={e => { setContextStrategy(e.target.value); setStatus(""); }}>
             <option value="projected">持久化上下文投影（推荐）</option>
@@ -333,6 +356,19 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
           </select>
         </label>
         <span className="settings-pane__hint">完整对话始终保留；切换策略从下一轮生效。</span>
+      </section>
+
+      <section className="settings-pane__section">
+        <div className="settings-pane__section-title">模型能力</div>
+        <label className="settings-pane__field settings-pane__field--check">
+          <input type="checkbox" checked={vision} onChange={e => { setVision(e.target.checked); setStatus(""); }} />
+          支持图片（截图/图像会作为视觉输入喂给模型）
+        </label>
+        <label className="settings-pane__field settings-pane__field--check">
+          <input type="checkbox" checked={video} onChange={e => { setVideo(e.target.checked); setStatus(""); }} />
+          支持视频（启用 video_snapshots 抽帧分析页面录屏/视频）
+        </label>
+        <span className="settings-pane__hint">不勾选则对应能力对 Agent 隐藏，避免向不支持多模态的模型发送图片导致报错。</span>
       </section>
 
       {error && <div className="settings-pane__error">{error}</div>}

@@ -240,6 +240,16 @@ function applyEvent(s, ev) {
         ...(imgs && imgs.length ? { images: imgs } : {}),
       };
     }
+  } else if (ev.type === "choices_offer") {
+    // 二开 M2：可点击方向选项。作为普通 step 落盘，切栏/重载后按钮仍在。
+    s.steps.push({
+      kind: "choices",
+      question: ev.question,
+      options: ev.options || [],
+      allow_custom: ev.allow_custom !== false,
+    });
+    s._curText = -1;
+    s._curThink = -1;
   }
 }
 
@@ -489,7 +499,8 @@ export const agentSession = {
         const active = configStore.getActiveModelProfile && configStore.getActiveModelProfile();
         const pid = (active && active.provider) || (configStore.getActiveProvider && configStore.getActiveProvider());
         const model = (active && active.model) || (pid && configStore.getModel && configStore.getModel(pid));
-        vision = !!(isVisionModel && isVisionModel(model));
+        // 二开 M4：用户在模型配置里勾了「支持图片」直接生效，勾了没勾都压过模型名启发式。
+        vision = !!(client.vision || (isVisionModel && isVisionModel(model)));
       } catch {
         /* 取不到当不支持视觉 */
       }
@@ -578,6 +589,8 @@ export const agentSession = {
         autoApprove: !confirmMode,
         assist, // AI辅助模式：无工具纯文字回复=正常收尾（停下给方向），不 drift 逼它继续
         vision,
+        // 二开 M4：未勾选「支持视频」就不下发 video_snapshots（抽帧是图，模型看不懂/白烧 token）。
+        hiddenTools: client.video ? null : ["video_snapshots"],
         maxRounds,
         maxPerTool,
         signal: ac.signal,

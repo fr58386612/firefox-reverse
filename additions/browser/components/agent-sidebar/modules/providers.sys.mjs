@@ -280,6 +280,10 @@ export function buildClientFromStore(store, overrides = {}) {
     chatPath,
     apiKey: overrides.apiKey || (profile && profile.apiKey) || store.getApiKey(id),
     model: overrides.model || (profile && profile.model) || store.getModel(id) || p.defaultModel,
+    // 二开 M3/M4：模型配置里显式设置的上下文窗口(kTokens)与能力开关，随当前 profile 生效。
+    contextWindowK: overrides.contextWindowK ?? (profile && profile.contextWindowK) ?? 0,
+    vision: overrides.vision ?? !!(profile && profile.vision),
+    video: overrides.video ?? !!(profile && profile.video),
     promptCacheMode:
       overrides.promptCacheMode ||
       (store.getPromptCacheMode && store.getPromptCacheMode()) ||

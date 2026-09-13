@@ -36,6 +36,9 @@ function cleanProfileName(value, fallback = "模型配置") {
 
 function normalizeProfile(raw = {}) {
   const provider = String(raw.provider || "deepseek").trim() || "deepseek";
+  // 二开 M3/M4：上下文窗口(kTokens，0/缺省=按模型名自动探测) + 模型能力开关(视觉/视频)。
+  // 读取时容错：旧配置缺这些字段 → 落到自动档/关，向后兼容不 bump 存储版本。
+  const winK = Number(raw.contextWindowK);
   return {
     id: String(raw.id || profileId()).slice(0, 100),
     name: cleanProfileName(raw.name, PROVIDER_NAMES[provider] || "模型配置"),
@@ -45,6 +48,9 @@ function normalizeProfile(raw = {}) {
     baseUrl: String(raw.baseUrl || "").trim(),
     protocol: raw.protocol === "anthropic" ? "anthropic" : "openai",
     reasoningEffort: normalizeReasoningEffort(raw.reasoningEffort || "auto"),
+    contextWindowK: Number.isFinite(winK) && winK > 0 ? Math.min(Math.round(winK), 2000) : 0,
+    vision: !!raw.vision,
+    video: !!raw.video,
     createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
     updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now(),
   };

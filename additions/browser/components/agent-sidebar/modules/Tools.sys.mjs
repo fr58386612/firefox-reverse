@@ -193,6 +193,20 @@ function toolTable() {
       b => b.page && b.page.screenshot,
       (b, a, ctx) => b.page.screenshot(a, ctx)
     ),
+    T(
+      "video_snapshots",
+      "对当前页面 <video> 抽帧看画面内容（默认时长上均匀抽 4 帧，可传 at 指定秒数列表）。用于核对播放/录屏页面里展示了什么。注意：需模型配置勾选了图片+视频能力帧才会喂给模型；跨域/DRM 视频可能抽不出帧（返回错误里带原因）。",
+      {
+        type: "object",
+        properties: {
+          index: { type: "integer", description: "第几个 <video>（默认 0）" },
+          count: { type: "integer", description: "均匀抽帧数量，默认 4，最多 8" },
+          at: { type: "array", items: { type: "number" }, description: "指定抽帧时间点（秒），给了就忽略 count" },
+        },
+      },
+      b => b.page && b.page.videoSnapshots,
+      (b, a, ctx) => b.page.videoSnapshots(a, ctx)
+    ),
 
     // ───────── ⑥ 代码搜索（backend: code） ─────────
     T(
@@ -1187,6 +1201,42 @@ function toolTable() {
       },
       b => b.env && b.env.delete,
       (b, a) => b.env.delete(a)
+    ),
+    T(
+      "offer_choices",
+      "【需要用户拍板方向时】把 2-6 条候选方向渲染成侧栏里**可点击的选项**交回用户，本轮随之结束等待选择。" +
+        "只在「真分叉」用：你被卡死、或确有几条实质不同且判不准优劣的路、或缺用户才能给的业务决策——" +
+        "**不要为了结束一轮而硬造分叉**，用户已给明确方向时直接执行别摆选项。" +
+        "options 每项 {label 简短方向名, detail 可选：这一路具体做什么/预期产出}；allow_custom 默认 true（用户可自由补充）。",
+      {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "要用户拍板的问题，一句话" },
+          options: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string", description: "选项短标签（≤20 字）" },
+                detail: { type: "string", description: "可选：这一路具体做什么、预期产出" },
+              },
+              required: ["label"],
+            },
+            description: "2-6 个候选方向；用户点击即作为下一条消息发出",
+          },
+          allow_custom: { type: "boolean", description: "允许用户自定义补充（默认 true）" },
+        },
+        required: ["question", "options"],
+      },
+      () => true,
+      async (b, a) => ({
+        question: String(a.question || ""),
+        options: (Array.isArray(a.options) ? a.options : [])
+          .slice(0, 6)
+          .filter(o => o && o.label)
+          .map(o => ({ label: String(o.label), detail: o.detail ? String(o.detail) : "" })),
+        allow_custom: a.allow_custom !== false,
+      })
     ),
   ];
 }

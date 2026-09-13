@@ -93,6 +93,11 @@ export class LlmClient {
       cfg.promptCacheTtl === "5m" || cfg.promptCacheTtl === "1h"
         ? cfg.promptCacheTtl
         : "default";
+    // 二开 M3/M4：用户显式配置的上下文窗口(kTokens，0=按模型名自动)与能力开关。
+    // AgentLoop 读 contextWindowK 缩放压缩阈值；runAgentTurn 读 vision 决定是否回喂截图。
+    this.contextWindowK = Number(cfg.contextWindowK) > 0 ? Math.min(Math.round(Number(cfg.contextWindowK)), 2000) : 0;
+    this.vision = !!cfg.vision;
+    this.video = !!cfg.video;
     this._compatKey = `${this.protocol}|${this.baseUrl}|${this.chatPath}`;
     this._cacheFieldsRejected = _cacheFieldRejectedEndpoints.has(this._compatKey);
     this._streamUsageRejected = _streamUsageRejectedEndpoints.has(this._compatKey);

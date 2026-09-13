@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
+import { renderMarkdown } from "./Markdown.jsx";
 
 /**
  * Agent 对话面板（A1+：多轮消息 + 多线程历史持久化）。
@@ -42,6 +43,7 @@ const SYSTEM = `你是 firefox-reverse 浏览器内置的 JS 逆向与自动化�
 - **不要每步都停下来问"要不要继续 / 是否继续 / 需要我做吗"**——默认一直推进到底。只有这两种情况才结束本轮：① 真正需要我提供你拿不到的东西（登录态/验证码/账号/纯业务决策）；② 目标已全部完成。
 - 用工作目录形成闭环：抓取/分析 → fs_write 落盘中间产物（脚本、trace、还原代码、笔记）→ run_node/run_python **实跑验证** → 与页面真实产出对照 → 修正，直到还原结果经得起独立实跑比对。
 - 工具失败/超时/结果为空别立刻收手：分析原因、换参数或换工具继续推进；同一工具别用相同入参反复重试。
+- **要用户在几条路里拍板时（缺账号/登录态之外的纯业务决策、或几条实质不同的技术路线）→ 调 \`offer_choices\`** 把方向做成可点击选项，别只用文字罗列让用户手打。
 
 【纪律】
 - 主动调工具，别空想；用中文，结论要可落地。
@@ -59,7 +61,7 @@ const ASSIST_BLOCK = `
 【执行模式：AI辅助（跟用户协作导航）】偏「逐阶段、跟用户对齐方向」，但**以用户当前的指令为最高优先**——下面 1 永远盖过 2/3 那套「停下给选项」的模板：
 1. **用户给了明确指令/实验/方向时**（例：「跑这个脚本」「别转 oracle/白盒，继续在黑盒上挖」「先做这个实验」）：**照做、做到底、回报具体结果**。**别用「我给你 2-3 个方向你选」这套模板把用户的指令顶掉，更别擅自转去用户刚否掉的方向**。这一轮你就是**执行 + 如实回报**，不是「提案 + 停」；该步内连续多调几个工具把它做完，别做一步就停。回报的是**真实跑出来的结果**，不是为收尾编的结论。
 2. **首轮 / 用户没给明确方向时**：先出一个**简短分阶段方案**（每阶段用什么工具、预期产出），停下问从哪开始（可先调 skill_get/notes_get/page_info 这类只读工具了解现状）。
-3. **只在「真分叉」才停下给选项**：你确实被卡死、或确有几条**实质不同**的路且判不准哪条好——这才给 2-3 个候选方向 + 你的推荐让用户选。**严禁为了结束这一轮、为了跳出反复试的循环，就硬造一个分叉、硬下一个体面的「根因」来收尾。**
+3. **只在「真分叉」才停下给选项**：你确实被卡死、或确有几条**实质不同**的路且判不准哪条好——这时调 \`offer_choices\` 把 2-3 个候选方向（含你的推荐）做成**可点击选项**交回用户，本轮随即结束。**严禁为了结束这一轮、为了跳出反复试的循环，就硬造一个分叉、硬下一个体面的「根因」来收尾。**
 4. **结论必须跟着你自己的证据走、不许自相矛盾**：写「根因/结论」前回看本轮自己的输出——你的日志若显示某步**成功了**，就不能写它「失败」；若是「补一个对象、报错就往后挪一步」，那是在**逼近**、不是「死路」。证据没指向某结论就别下，宁可写「还没定论，下一步具体做 X」然后接着做。
 5. 真拿不准、缺登录态/账号/验证码/纯业务决策，才停下问——辅助模式的价值是**用户帮你导航死路**，不是给你每轮找借口收尾。`;
 
@@ -146,11 +148,11 @@ function ToolStep({ step }) {
   );
 }
 
-// 一段正文：DeepSeek 的每轮文字回复，**始终可见**（不被折叠屏蔽）
+// 一段正文：DeepSeek 的每轮文字回复，**始终可见**（不被折叠屏蔽）。二开 M1：markdown 渲染。
 function TextSeg({ step, live }) {
   return (
-    <div className="msg__textseg">
-      {step.text}
+    <div className="msg__textseg md-in">
+      {renderMarkdown(step.text)}
       {live ? <span className="msg__cursor">▌</span> : null}
     </div>
   );
@@ -161,16 +163,52 @@ function ThinkSeg({ step, live }) {
   return (
     <details className="msg__think" open>
       <summary className="msg__think-label">💭 思考过程</summary>
-      <div className="msg__think-body">
-        {step.text}
+      <div className="msg__think-body md-in">
+        {renderMarkdown(step.text)}
         {live ? <span className="msg__cursor">▌</span> : null}
       </div>
     </details>
   );
 }
 
+// 二开 M2：AI 给出的可点击方向选项。点击=作为用户消息发出；allow_custom 时可输入补充方向。
+function ChoicesStep({ step, onChoose, disabled }) {
+  const [custom, setCustom] = useState("");
+  const off = disabled || !onChoose;
+  const pick = (t) => { if (!off && t) onChoose(t); };
+  return (
+    <div className="msg__choices">
+      {step.question ? <div className="msg__choices-q">❓ {step.question}</div> : null}
+      <div className="msg__choices-btns">
+        {(step.options || []).map((o, i) => (
+          <button
+            key={i}
+            type="button"
+            className="msg__choice"
+            disabled={off}
+            title={o.detail || ""}
+            onClick={() => pick(`我选：${o.label}${o.detail ? `（${o.detail}）` : ""}`)}
+          >{o.label}</button>
+        ))}
+      </div>
+      {step.allow_custom !== false && (
+        <div className="msg__choices-custom">
+          <input
+            value={custom}
+            disabled={off}
+            placeholder="都不是？补充你的方向…"
+            onChange={e => setCustom(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && custom.trim()) { pick(custom.trim()); setCustom(""); } }}
+          />
+          <button type="button" disabled={off || !custom.trim()} onClick={() => { pick(custom.trim()); setCustom(""); }}>发送补充</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 渲染 steps：正文段/思考段始终显示；工具步骤按 hideTools 折叠。live 时给最后一段加光标。
-function StepList({ steps, hideTools, live }) {
+function StepList({ steps, hideTools, live, onChoose, choicesDisabled = true }) {
   return steps.map((s, j) => {
     if (s.kind === "tool") {
       return hideTools ? null : <ToolStep key={j} step={s} />;
@@ -178,15 +216,18 @@ function StepList({ steps, hideTools, live }) {
     if (s.kind === "think") {
       return <ThinkSeg key={j} step={s} live={live && j === steps.length - 1} />;
     }
+    if (s.kind === "choices") {
+      return <ChoicesStep key={j} step={s} onChoose={onChoose} disabled={choicesDisabled} />;
+    }
     return <TextSeg key={j} step={s} live={live && j === steps.length - 1} />;
   });
 }
 
 // 完成态 assistant 消息体：默认展开全过程；收起后**只保留最后一段（结论）**，思考/工具/中间正文一并收齐
-function AssistantBody({ steps, content }) {
+function AssistantBody({ steps, content, onChoose, choicesActive }) {
   const [collapsed, setCollapsed] = useState(false);
   if (!steps || !steps.length) {
-    return <div className="msg__content">{content}</div>;
+    return <div className="msg__content md-in">{renderMarkdown(content)}</div>;
   }
   const toolCount = steps.filter(s => s.kind === "tool").length;
   // 最后一段正文（最终结论）的下标
@@ -197,13 +238,13 @@ function AssistantBody({ steps, content }) {
       break;
     }
   }
-  // 有「过程」可收起：含工具/思考，或正文不止一段
+  // 有「过程」可收起：含工具/思考/选项，或正文不止一段
   const collapsible =
     steps.some(s => s.kind !== "text") || steps.filter(s => s.kind === "text").length > 1;
   const shown = collapsed ? (lastTextIdx >= 0 ? [steps[lastTextIdx]] : steps.slice(-1)) : steps;
   return (
     <div className="msg__content">
-      <StepList steps={shown} hideTools={false} />
+      <StepList steps={shown} hideTools={false} onChoose={onChoose} choicesDisabled={!choicesActive} />
       {collapsible && (
         <button type="button" className="msg__toolToggle" onClick={() => setCollapsed(v => !v)}>
           {collapsed ? `▸ 展开思考/工具过程（${toolCount} 步工具）` : "▾ 收起过程，只看结论"}
@@ -789,7 +830,14 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
   }
 
   async function send() {
-    const text = input.trim();
+    const t = input.trim();
+    if (!t || busy) return;
+    setInput("");
+    await sendText(t);
+  }
+
+  // 二开 M2：任何"以用户身份发一条消息"的入口（输入框 / 选项按钮 / 补充框）共用这条通路。
+  async function sendText(text) {
     if (!text || busy) {
       return;
     }
@@ -797,7 +845,6 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
     setNotice(null);
     const userMsg = { role: "user", content: text };
     setMessages([...messages, userMsg]); // 乐观显示；发给模型的权威历史下面从持久化 store 读
-    setInput("");
     resetSteps();
     atBottomRef.current = true; // 发送即贴底，跟随本次回复
     autoApproveRef.current = false;
@@ -1248,7 +1295,12 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
           <div key={i} className={`msg msg--${m.role}`}>
             <div className="msg__role">{m.role === "user" ? "你" : "Agent助手"}</div>
             {m.role === "assistant" ? (
-              <AssistantBody steps={m.steps} content={m.content} />
+              <AssistantBody
+                steps={m.steps}
+                content={m.content}
+                onChoose={sendText}
+                choicesActive={!busy && i === messages.length - 1}
+              />
             ) : (
               <div className="msg__content">{m.content}</div>
             )}

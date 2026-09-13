@@ -28,11 +28,27 @@ const COMPACT_MIN_ROUNDS = 2;
 // 模型连续返回"纯文字、不调工具"的最多自动续跑次数。超过就当它真的停了（防纯文字死循环空转）。
 const MAX_AUTO_CONTINUE = 3;
 
+// 二开 M4：一个回合内回喂给视觉模型的图片滚动上限——只保留最近这些张，更早的换成文字占位。
+// 一张 ≤1568px 图约 1.1~1.6k token；3 张 + 文字说明 ≈ 5k，长回合也不会让图吃穿上下文窗口。
+const VISION_KEEP_IMAGES = 3;
+
 // ★按模型上下文窗口缩放「压缩阈值 / trim 上限 / 单结果截断」——这是「同模型在 Claude Code 丝滑、
 // 在本 Agent 毛病多」的主因：强模型(大窗口)被按小窗口(64k)的保守值过早压缩 + 狠截工具结果 →
 // 反复丢状态、重读重搜 = 空转。仅靠模型名启发式分档（判不准就落默认档，绝不超窗）。
 // 自定义端点跑 Opus 时模型名含 "opus" → XL 档。
-function modelBudget(model) {
+// 二开 M3：用户在模型配置里显式填了 contextWindowK(kTokens) 时优先按它推导（win 的 80% 压缩、
+// 100% trim、20% 单结果上限），没填(0)才退回模型名启发式——名字千奇百怪的自建端点不再猜错档。
+function modelBudget(model, winK = 0) {
+  const k = Number(winK);
+  if (Number.isFinite(k) && k > 0) {
+    const win = Math.min(Math.round(k), 2000) * 1000;
+    return {
+      compactAt: Math.floor(win * 0.8),
+      maxChars: win,
+      resultCap: Math.max(8000, Math.min(150000, Math.floor(win * 0.2))),
+      explicit: true,
+    };
+  }
   const m = String(model || "").toLowerCase();
   // XL：百万级上下文 —— opus / gemini-1.5,2 / **deepseek-v4 全系（官方 API 默认即 1M）** / 任何带 1m 标记的模型。
   // （[1m] 这类标记仍兜底识别；LlmClient 发请求时会把标记剥掉，API 收到的是纯净模型名。）
@@ -531,6 +547,7 @@ export async function runAgentTurn(p) {
     autoApprove = false,
     assist = false, // AI辅助逐阶段模式：无工具的纯文字回复=正常收尾（停下报告+给方向），不当 drift 逼它继续
     vision = false, // 模型是否支持看图：true 时把截图等图像作为 user 图片消息回喂
+    hiddenTools = null, // 二开 M4：按模型能力隐藏的工具名（如未勾选视频时不下发 video_snapshots），避免模型调用后必然失败/白烧 token
     contextStrategy = "legacy", // projected=小上下文+大结果折叠；legacy=旧行为，可随时回退
     cacheKey = "",
   } = p || {};
@@ -547,7 +564,10 @@ export async function runAgentTurn(p) {
 
   // ★按当前模型上下文窗口缩放预算（强模型少压缩/少截结果 → 少空转、少重读重搜）。从 client.model 解析，
   // 判不准落默认档（=现状，安全）。注意用局部变量、不改模块常量 → 多会话并发安全。
-  const _bud = modelBudget(client.model || (client.config && client.config.model));
+  const _bud = modelBudget(
+    client.model || (client.config && client.config.model),
+    client.contextWindowK || (client.config && client.config.contextWindowK) || 0
+  );
   const maxChars = _bud.maxChars;
   const compactAt = _bud.compactAt;
   // 单工具结果进上下文的截断上限：**随窗口缩放**（默认档 50k / 大模型 150k）。
@@ -632,9 +652,11 @@ export async function runAgentTurn(p) {
   ];
 
   // Stable order is part of the provider cache prefix.
+  const hidden = hiddenTools instanceof Set ? hiddenTools : new Set(hiddenTools || []);
   const tools = router
     .listSpecs()
     .slice()
+    .filter(t => !hidden.has(String(t?.function?.name || "")))
     .sort((a, b) =>
       String(a?.function?.name || "").localeCompare(String(b?.function?.name || ""))
     );
@@ -653,6 +675,9 @@ export async function runAgentTurn(p) {
   let noProgress = 0;
   const NO_PROGRESS_BUDGET = 12; // 配合 _isProgress 修正(失败的 run_node 不再误计为前进)：这下能真累计了，稍早一点提醒换路线
   let forcedDecisionPending = false; // 已注入强制决策提示、等模型给出"切换/继续(带证据)/阻塞报告"
+  let pendingChoiceOffer = null; // offer_choices（二开 M2）：本轮模型摆出可点选项 → 结束回合交回用户
+  // 二开 M4：本回合已回喂给模型的图片消息（滚动预算用）。
+  const fedImageMsgs = [];
 
   for (let round = 1; round <= maxRounds; round++) {
     // 手动停止（侧边栏「停止」按钮 abort）：在轮次边界干净退出，返回已有进展。
@@ -923,6 +948,16 @@ export async function runAgentTurn(p) {
       allToolCalls.push({ name, args, env, id: tc.id });
       emit({ type: "tool_result", name, env, id: tc.id });
 
+      // 二开 M2：offer_choices 成功 → 记录选项，本轮跑完当前工具批次后即结束等用户点选。
+      if (name === "offer_choices" && env && env.ok && env.data) {
+        pendingChoiceOffer = {
+          question: String(env.data.question || ""),
+          options: Array.isArray(env.data.options) ? env.data.options : [],
+          allow_custom: env.data.allow_custom !== false,
+          id: tc.id,
+        };
+      }
+
       // A2：更新重复跟踪。被熔断拒绝(repeatBlocked)的不计入；正常执行后比对结果指纹：
       // 与上次相同→n++（逼近阈值）；不同（有新信息）→重置为 0。换了参数=新 callSig=独立计数。
       if (callSig && !repeatBlocked) {
@@ -1016,6 +1051,8 @@ export async function runAgentTurn(p) {
       });
 
       // 视觉回喂：模型支持看图时，把图像作为 user 图片消息追加，让模型"看见"页面。
+      // 成本控制（二开 M4）：整个回合滚动只保留最近 VISION_KEEP_IMAGES 张——更早的图换成文字占位，
+      // 否则长回合里每张截图/视频帧都永久吃上下文（一张 1568px 图 ≈ 1.6k token），很快就挤爆窗口。
       if (media && media.length && vision) {
         const blocks = [
           { type: "text", text: `（${name} 返回 ${media.length} 张图，请据此判断页面与下一步操作）` },
@@ -1026,9 +1063,36 @@ export async function runAgentTurn(p) {
           }
         }
         if (blocks.length > 1) {
-          msgs.push({ role: "user", content: blocks });
+          const shotMsg = { role: "user", content: blocks };
+          msgs.push(shotMsg);
+          fedImageMsgs.push(shotMsg);
+          while (
+            fedImageMsgs.length &&
+            fedImageMsgs.reduce((n, m) => n + m.content.filter(b => b.type === "image_url").length, 0) >
+              VISION_KEEP_IMAGES
+          ) {
+            const oldest = fedImageMsgs.shift();
+            oldest.content = [
+              { type: "text", text: "（较早的截图/视频帧已因视觉预算被丢弃；需要重看画面请重新截图/抽帧）" },
+            ];
+          }
         }
       }
+    }
+
+    // 二开 M2：本轮调过 offer_choices → 发出 choices_offer 事件并立即结束回合（工具结果已进 msgs，
+    // 下一轮历史里模型能看到自己的选项与用户的点选）。stopReason 不在 NON_TERMINAL 集内，
+    // 故全自动/AI辅助两种模式都会干净交回用户。
+    if (pendingChoiceOffer) {
+      emit({ type: "choices_offer", round, ...pendingChoiceOffer });
+      return {
+        content: res.content || pendingChoiceOffer.question,
+        rounds: round,
+        toolCalls: allToolCalls,
+        messages: msgs,
+        stopReason: "await_choice",
+        choices: pendingChoiceOffer,
+      };
     }
 
     // A1 无进展软提醒（轻量、不强制）：连续 NO_PROGRESS_BUDGET 次零真实前进 → 注入**一条温和提醒**，

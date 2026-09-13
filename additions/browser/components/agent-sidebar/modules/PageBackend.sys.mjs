@@ -762,20 +762,93 @@ export class PageBackend {
     const rectH = fullPage ? Math.min(d.fh || d.h, 5000) : d.h;
     const rect = new win.DOMRect(fullPage ? 0 : d.sx, fullPage ? 0 : d.sy, d.w, rectH);
     const bitmap = await wgp.drawSnapshot(rect, 1, "rgb(255,255,255)", false);
+    // 二开 M4：进模型/回喂前压到 ≤1568px JPEG——1568 是主流视觉模型的推荐长边，再大不增信息只烧 token；
+    // 整页长截图(高可达 5000)按长边等比缩，展示与喂模共用这一张。
+    const MAX_SIDE = 1568;
+    const scale = Math.min(1, MAX_SIDE / Math.max(1, bitmap.width, bitmap.height));
     const canvas = win.document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const cctx = canvas.getContext("2d");
+    if (scale < 1) {
+      cctx.imageSmoothingQuality = "high";
+    }
+    cctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     if (typeof bitmap.close === "function") {
       bitmap.close();
     }
-    const dataUrl = canvas.toDataURL("image/png");
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
     return {
       ok: true,
       width: canvas.width,
       height: canvas.height,
-      note: `已截图 ${canvas.width}x${canvas.height}（${fullPage ? "整页" : "可视区"}）`,
-      _media: [{ type: "image", mime: "image/png", dataUrl }],
+      note: `已截图 ${canvas.width}x${canvas.height}（${fullPage ? "整页" : "可视区"}${scale < 1 ? "，已缩放至长边≤1568" : ""}）`,
+      _media: [{ type: "image", mime: "image/jpeg", dataUrl }],
+    };
+  }
+
+  /**
+   * 二开 M4：对页面 <video> 抽帧。默认在时长上均匀采样 count 帧，或用 at 指定时间点（秒）。
+   * 帧在页面内用 canvas 绘制导出 JPEG → _media（视觉开启时喂给模型）。
+   * 限制：跨域视频 canvas 会被污染（toDataURL 抛 SecurityError）、DRM/EME 视频画出来是黑帧——
+   * 原样把错误/提示带回，由模型决定换策略（如先 page_click 播放、换资源直链）。
+   */
+  async videoSnapshots({ index = 0, count = 4, at = null, maxSide = 768 } = {}, ctx) {
+    const n = Math.max(1, Math.min(8, Math.round(Number(count) || 4)));
+    const idx = Math.max(0, Math.round(Number(index) || 0));
+    const side = Math.max(64, Math.min(1920, Math.round(Number(maxSide) || 768)));
+    const times = Array.isArray(at) ? at.map(Number).filter(t => Number.isFinite(t)).slice(0, n) : null;
+    const expr = `(async () => {
+      const vids = Array.from(document.querySelectorAll("video"));
+      if (!vids.length) return { error: "no_video", hint: "页面没有 <video> 元素；确认页面已加载/已点播放" };
+      const v = vids[${idx}] || vids[0];
+      if (v.readyState < 1) {
+        try { v.load(); } catch (e) {}
+        await new Promise(r => { v.addEventListener("loadedmetadata", r, { once: true }); setTimeout(r, 5000); });
+      }
+      if (v.readyState < 1) return { error: "not_loaded", hint: "视频元数据未就绪（可能需先点击播放/懒加载）；用 page_click 触发后重试", videoCount: vids.length };
+      const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+      const req = ${times ? JSON.stringify(times) : "null"};
+      const times = req && req.length ? req.slice(0, ${n}) : Array.from({ length: ${n} }, (_, i) => dur ? Math.min(Math.max(dur - 0.05, 0), dur * (i + 0.5) / ${n}) : i);
+      const seeked = () => new Promise(res => { const h = () => { v.removeEventListener("seeked", h); res(); }; v.addEventListener("seeked", h); setTimeout(res, 6000); });
+      const wasPaused = v.paused; const restoreT = v.currentTime;
+      const scale = Math.min(1, ${side} / Math.max(1, v.videoWidth || 640, v.videoHeight || 360));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round((v.videoWidth || 640) * scale));
+      c.height = Math.max(1, Math.round((v.videoHeight || 360) * scale));
+      const cx = c.getContext("2d");
+      const frames = []; let err = "";
+      for (const t of times) {
+        try {
+          if (Math.abs(v.currentTime - t) > 0.02) { v.currentTime = t; await seeked(); }
+          cx.drawImage(v, 0, 0, c.width, c.height);
+          frames.push({ t: Math.round(t * 100) / 100, dataUrl: c.toDataURL("image/jpeg", 0.7) });
+        } catch (e) { err = String((e && e.name) || e); break; }
+      }
+      try { v.currentTime = restoreT; } catch (e) {}
+      if (!wasPaused) { try { v.play(); } catch (e) {} }
+      return { videoCount: vids.length, index: ${idx}, duration: dur, width: v.videoWidth || 0, height: v.videoHeight || 0, src: String(v.currentSrc || v.src || "").slice(0, 200), frames, err };
+    })()`;
+    const r = await this.eval({ expression: expr }, ctx);
+    const d = (r && r.value) || {};
+    if (d.error) {
+      return { ok: false, error: d.error, note: d.hint || "" };
+    }
+    const frames = Array.isArray(d.frames) ? d.frames.filter(f => f && f.dataUrl) : [];
+    if (!frames.length) {
+      const why = d.err === "SecurityError"
+        ? "跨域视频画布被污染，无法导出帧（SecurityError）。可改用网络抓包/直接分析视频源，或找同源副本。"
+        : d.err === "InvalidStateError"
+          ? "视频状态异常（可能 DRM 保护）"
+          : `未能导出任何帧${d.err ? "：" + d.err : ""}（DRM/EME 保护视频画出来是黑帧或不可绘）`;
+      return { ok: false, error: "extract_failed", note: why, videoCount: d.videoCount, src: d.src };
+    }
+    return {
+      ok: true,
+      note: `已从第 ${d.index} 个 <video>（共 ${d.videoCount} 个，时长 ${d.duration ? d.duration.toFixed(1) + "s" : "未知"}，${d.width}x${d.height}）抽 ${frames.length}/${(Array.isArray(at) && at.length) || count || 4} 帧${d.err ? `（后段失败：${d.err}）` : ""}`,
+      src: d.src,
+      frames: frames.map(f => ({ t: f.t })),
+      _media: frames.map(f => ({ type: "image", mime: "image/jpeg", dataUrl: f.dataUrl, note: `${f.t}s` })),
     };
   }
 }

@@ -303,13 +303,29 @@ function fmtTokens(n) {
   if (value < 1000000) return (value / 1000).toFixed(value < 10000 ? 1 : 0) + "K";
   return (value / 1000000).toFixed(1) + "M";
 }
+// 二开 M6：字符数中文人话（压缩通知用）。
+function fmtChars(n) {
+  const v = Number(n || 0);
+  if (v >= 10000) return (v / 10000).toFixed(1) + "万字";
+  if (v >= 1000) return (v / 1000).toFixed(1) + "k字";
+  return v + "字";
+}
+
+// 二开 M6：对话框斜杠命令。输入以 / 开头弹菜单；send() 拦截执行，不进模型、不发用户消息。
+const SLASH_COMMANDS = [
+  { cmd: "/compact", desc: "立即压缩上下文（AI 把早期历史折叠成续写摘要，UI 记录不丢）" },
+  { cmd: "/context", desc: "查看上下文占用（上次请求 token / 预算 / 是否已折叠）" },
+  { cmd: "/skills", desc: "列出可用技能（含启用/禁用状态）" },
+  { cmd: "/mcp", desc: "查看 MCP 服务器连接状态与工具数" },
+  { cmd: "/help", desc: "显示全部可用命令" },
+];
 
 // chrome 特权全局（侧边栏文档 = chrome:// 系统 principal）。typeof 守卫，取不到则降级（按钮报错不崩）。
 const _CC = typeof Components !== "undefined" ? Components.classes : typeof Cc !== "undefined" ? Cc : null;
 const _CI = typeof Components !== "undefined" ? Components.interfaces : typeof Ci !== "undefined" ? Ci : null;
 const _SVC = typeof Services !== "undefined" ? Services : null;
 
-export default function AgentPanel({ buildClient, conversations, store, router, runAgentTurn, session, isVisionModel, workspace, notes, skill, toolNames = [], onOpenEnvironment, onOpenSettings, onOpenSkills, hidden = false }) {
+export default function AgentPanel({ buildClient, conversations, store, router, runAgentTurn, session, isVisionModel, workspace, notes, skill, mcp, contextBudgetFor, toolNames = [], onOpenEnvironment, onOpenSettings, onOpenSkills, hidden = false }) {
   const [messages, setMessages] = useState([]); // 仅 user/assistant
   const [threads, setThreads] = useState([]); // 摘要列表
   const [currentId, setCurrentId] = useState(null);
@@ -323,6 +339,9 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
   const [notice, setNotice] = useState(null);
   const [cancellationPending, setCancellationPending] = useState(false);
   const [usage, setUsage] = useState(null);
+  const [ctxStat, setCtxStat] = useState(null); // 二开 M6：本线程引擎快照（lastUsage/contextProjected），驱动上下文状态条
+  const threadProjectedRef = useRef(false); // 当前线程是否已有持久化投影（重启后 lastUsage 没了，"已折叠"标记仍要在）
+  const [slashDismiss, setSlashDismiss] = useState(false); // 二开 M6：Esc 关掉斜杠菜单（改输入会再弹）
   const [workspaceDir, setWorkspaceDir] = useState(null); // 当前会话绑定的工作目录
   const [mode, setMode] = useState(null); // 本会话执行模式："auto"=全自动一条龙 / "assist"=AI辅助逐阶段 / null=未选（首次新建会话让用户选）
   const [files, setFiles] = useState([]); // 工作目录文件列表（展开时填充）
@@ -403,6 +422,8 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
           setMessages(t.messages || []);
           setCancellationPending(t.cancellationPending === true);
           setUsage(t.usage || null);
+          setCtxStat(prev => ({ ...(prev || {}), contextProjected: !!t.contextProjection }));
+          threadProjectedRef.current = !!t.contextProjection;
           bindWorkspace(effectiveWorkspace(t));
           setMode((t && t.mode) || null);
           refreshThreads();
@@ -421,6 +442,36 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
     if (session && currentId && session.isRunning(currentId)) {
       setBusy(true);
     }
+  }, [session, currentId]);
+
+  // 二开 M6：订阅引擎快照 → 上下文状态条（上次请求 prompt token、是否已投影折叠）。
+  // subscribe 返回退订函数；线程切换/卸载时退订。快照节流由引擎侧 notify 控制，UI 只存两个标量。
+  useEffect(() => {
+    if (!session || !currentId || !session.subscribe) {
+      setCtxStat(null);
+      return undefined;
+    }
+    let off = null;
+    try {
+      off = session.subscribe(currentId, s => {
+        setCtxStat({
+          lastUsage: s.lastUsage || null,
+          contextProjected: !!s.contextProjected || threadProjectedRef.current,
+          running: !!s.running,
+        });
+      });
+    } catch {
+      /* 订阅失败不影响对话主链路 */
+    }
+    return () => {
+      if (off) {
+        try {
+          off();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
   }, [session, currentId]);
 
   // 多窗口隔离的**预留生命周期 + 心跳**：本侧栏显示 currentId 期间，定时 renew 续约证明本窗口还活着
@@ -836,9 +887,95 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
     }
   }
 
+  // 二开 M6：渲染期与 /context 命令共用的上下文占用计算（token 用量 × modelBudget 同源预算）。
+  function computeCtxInfo() {
+    if (!contextBudgetFor) return null;
+    try {
+      const active = store.getActiveModelProfile && store.getActiveModelProfile();
+      const pid = (active && active.provider) || (store.getActiveProvider && store.getActiveProvider());
+      const model = (active && active.model) || (pid && store.getModel && store.getModel(pid));
+      const winK = (active && active.contextWindowK) || 0;
+      const b = contextBudgetFor(model, winK);
+      const used = Number((ctxStat && ctxStat.lastUsage && ctxStat.lastUsage.inputTokens) || 0);
+      return {
+        model: model || "",
+        used,
+        compactAt: b.compactAt,
+        maxChars: b.maxChars,
+        explicit: !!b.explicit,
+        projected: !!(ctxStat && ctxStat.contextProjected),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // 二开 M6：执行一条斜杠命令。结果一律走 notice（单行、可关），不进对话、不发模型。
+  async function runSlash(raw) {
+    const [name, ...rest] = raw.trim().split(/\s+/);
+    const cmd = String(name || "").toLowerCase();
+    setNotice(null);
+    setError(null);
+    try {
+      if (cmd === "/help") {
+        setNotice("可用命令：" + SLASH_COMMANDS.map(c => `${c.cmd} ${c.desc}`).join("　|　"));
+      } else if (cmd === "/compact") {
+        if (!session || !session.compactNow) {
+          setNotice("当前版本不支持手动压缩");
+        } else if (!currentId) {
+          setNotice("没有进行中的对话，无需压缩");
+        } else {
+          setNotice("正在压缩上下文…（会调用一次模型做续写摘要，不占用对话回合）");
+          const r = await session.compactNow(currentId);
+          setNotice(r.ok
+            ? `已压缩上下文：${r.total} 条消息中前 ${r.cutoff} 条折叠成续写摘要，历史体积 ${fmtChars(r.beforeChars)} → ${fmtChars(r.afterChars)}。聊天记录本身不变。`
+            : `未压缩：${r.error}`);
+        }
+      } else if (cmd === "/context") {
+        const c = computeCtxInfo();
+        if (!c) {
+          setNotice("上下文信息不可用");
+        } else {
+          setNotice(`模型 ${c.model || "未配置"} · 上次请求 ≈${fmtTokens(c.used)} tok · 自动压缩阈值 ${fmtTokens(c.compactAt)} · 窗口上限 ${fmtTokens(c.maxChars)}${c.explicit ? "（手动配置）" : "（按模型名推测）"}${c.projected ? " · 早期历史已折叠" : ""}${c.used ? "" : " · 本次启动后还没有模型调用，用量将在首次请求后显示"}`);
+        }
+      } else if (cmd === "/skills") {
+        if (!skill || !skill.list) {
+          setNotice("技能后端不可用");
+        } else {
+          const r = await skill.list({}, { workspaceRoot: workspaceDir || null });
+          const all = r.skills || [];
+          const off = all.filter(s => s.disabled);
+          const on = all.filter(s => !s.disabled);
+          setNotice(`技能 ${on.length} 个可用${off.length ? `（另有 ${off.length} 个已禁用：${off.map(s => s.name).join("、")}）` : ""}：${on.map(s => s.name).join("、") || "仅内置"}。启用/禁用/编辑在技能库页。`);
+        }
+      } else if (cmd === "/mcp") {
+        if (!mcp || !mcp.status) {
+          setNotice("MCP 后端不可用");
+        } else {
+          const st = mcp.status();
+          setNotice(st.length
+            ? "MCP：" + st.map(s => `${s.name} ${!s.enabled ? "已禁用" : s.connected ? `已连接·${s.toolCount} 工具` : `未连接${s.error ? "（" + String(s.error).slice(0, 40) + "）" : "（回合开始时自动懒连接）"}`}`).join("；")
+            : "未配置 MCP 服务器。在设置页「MCP 服务器」添加。");
+        }
+      } else {
+        setNotice(`未知命令 ${cmd}——输入 / 弹出命令菜单，或 /help 查看全部`);
+      }
+    } catch (e) {
+      setNotice("命令执行失败：" + (e?.message || e));
+    }
+  }
+
   async function send() {
     const t = input.trim();
-    if (!t || busy) return;
+    if (!t) return;
+    // 二开 M6：斜杠命令本地执行，不进模型。只拦 send()——选项按钮等走 sendText 的通路不受影响。
+    if (t.startsWith("/")) {
+      setInput("");
+      setSlashDismiss(false);
+      await runSlash(t);
+      return;
+    }
+    if (busy) return;
     setInput("");
     await sendText(t);
   }
@@ -1052,6 +1189,8 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
       setMessages(t.messages);
       setCancellationPending(t.cancellationPending === true);
       setUsage(t.usage || null);
+      setCtxStat(prev => ({ ...(prev || {}), contextProjected: !!t.contextProjection }));
+      threadProjectedRef.current = !!t.contextProjection;
       setError(null);
       bindWorkspace(effectiveWorkspace(t));
       setMode((t && t.mode) || null);
@@ -1134,7 +1273,33 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
     }
   }
 
+  // 二开 M6：斜杠菜单状态——只在刚输入命令名（还没打参数）时弹出。
+  const trimmedInput = input.trim().toLowerCase();
+  const slashOpen = !slashDismiss && input.startsWith("/") && !trimmedInput.slice(1).includes(" ") && !input.includes("\n");
+  const slashMatches = slashOpen ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(trimmedInput)) : [];
+
   function onKeyDown(e) {
+    if (slashOpen && slashMatches.length > 0) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlashDismiss(true);
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        setInput(slashMatches[0].cmd + " ");
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        const exact = SLASH_COMMANDS.find(c => c.cmd === trimmedInput);
+        if (!exact && slashMatches.length === 1) {
+          e.preventDefault(); // 唯一匹配 → 先补全，再按 Enter 执行
+          setInput(slashMatches[0].cmd + " ");
+          return;
+        }
+        // 无匹配/多匹配：照常 send()，由 runSlash 提示未知命令
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -1374,9 +1539,45 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
       {error && <div className="agent-panel__error">⚠ {error}</div>}
 
       <div className="agent-panel__input">
+        {slashOpen && slashMatches.length > 0 && (
+          <div className="agent-panel__slash" role="listbox" aria-label="斜杠命令">
+            {slashMatches.map(c => (
+              <button
+                key={c.cmd}
+                type="button"
+                className="agent-panel__slash-item"
+                onMouseDown={(e) => e.preventDefault()} // 保住 textarea 焦点
+                onClick={() => setInput(c.cmd + " ")}
+              >
+                <code>{c.cmd}</code>
+                <span>{c.desc}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {(() => {
+          // 二开 M6：上下文状态条——上次请求 prompt token vs 自动压缩阈值（与引擎 modelBudget 同源）。
+          const c = computeCtxInfo();
+          if (!c || (c.used <= 0 && !c.projected)) return null;
+          const pct = c.compactAt > 0 ? Math.min(100, Math.round((c.used / c.compactAt) * 100)) : 0;
+          const cls = pct >= 80 ? "is-hot" : pct >= 50 ? "is-warm" : "";
+          return (
+            <div
+              className={`ctx-meter ${cls}`}
+              title={`上次请求 ≈${fmtTokens(c.used)} tokens；达到 ${fmtTokens(c.compactAt)} 自动折叠早期历史（窗口上限 ${fmtTokens(c.maxChars)}${c.explicit ? "，手动配置" : "，按模型名估算"}）。点输入框输 /compact 可立即压缩。`}
+            >
+              <span className="ctx-meter__label">上下文</span>
+              <span className="ctx-meter__track"><span className="ctx-meter__fill" style={{ width: Math.max(pct, 2) + "%" }} /></span>
+              <span className="ctx-meter__num">
+                {c.used ? fmtTokens(c.used) : "0"}/{fmtTokens(c.compactAt)}
+                {c.projected ? " · 已折叠" : ""}
+              </span>
+            </div>
+          );
+        })()}
         <textarea
           value={input}
-          placeholder={busy ? "执行中…可继续输入，停止后或本轮结束再发送" : "输入消息，Enter 发送，Shift+Enter 换行"}
+          placeholder={busy ? "执行中…可继续输入，停止后或本轮结束再发送" : "输入消息，Enter 发送，Shift+Enter 换行；输入 / 可用命令（压缩/技能/MCP）"}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           rows={2}

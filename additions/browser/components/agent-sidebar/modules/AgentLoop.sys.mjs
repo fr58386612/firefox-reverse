@@ -61,6 +61,13 @@ function modelBudget(model, winK = 0) {
   return { compactAt: 250000, maxChars: 320000, resultCap: 50000 };
 }
 
+// 二开 M6：UI 侧「上下文状态条」用的只读视图——把内部 budget 的压缩阈值/窗口上限暴露给面板，
+// 与实际压缩逻辑共用同一个 modelBudget，杜绝 UI 显示与引擎行为不一致。
+export function contextBudgetFor(model, winK = 0) {
+  const b = modelBudget(model, winK);
+  return { compactAt: b.compactAt, maxChars: b.maxChars, explicit: !!b.explicit };
+}
+
 // 【输出被长度限制截断】的专用重试上限——**与 autoContinue/drift 完全解耦**。
 // 思考型模型(DeepSeek reasoner 等)的 reasoning_content 不受 prompt 约束、长度无界：难题轮里
 // reasoning 可能吃满 max_tokens，还没产出 content/tool_call 就被切(finish_reason=length，只剩"<"之类零碎)。

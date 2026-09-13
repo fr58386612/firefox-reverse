@@ -33,7 +33,7 @@ function loadModules() {
   const { createBuiltinTools } = ChromeUtils.importESModule(
     "resource:///modules/agentsidebar/Tools.sys.mjs"
   );
-  const { runAgentTurn } = ChromeUtils.importESModule(
+  const { runAgentTurn, contextBudgetFor } = ChromeUtils.importESModule(
     "resource:///modules/agentsidebar/AgentLoop.sys.mjs"
   );
   // 常驻后台对话引擎（跨侧栏面板重载存活）——UI 订阅它，切栏回来续看不丢。
@@ -50,6 +50,7 @@ function loadModules() {
     buildClient: () => buildClientFromStore(configStore),
     router,
     runAgentTurn,
+    contextBudgetFor,
     session: agentSession,
     isVisionModel,
     fetchModels,
@@ -80,6 +81,8 @@ function App({ mods }) {
         workspace={mods.workspace}
         notes={mods.notes}
         skill={mods.skill}
+        mcp={mods.mcp}
+        contextBudgetFor={mods.contextBudgetFor}
         toolNames={mods.toolNames}
         onOpenEnvironment={() => setView("environment")}
         onOpenSkills={() => setView("skills")}

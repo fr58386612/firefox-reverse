@@ -13,9 +13,12 @@ import { getBackends } from "./Backends.sys.mjs";
 import { configStore } from "./ConfigStore.sys.mjs";
 import {
   buildProjectionInput,
+  compactConversation,
   CONTEXT_PROJECTION_PROMPT,
   CONTEXT_PROJECTION_VERSION,
+  messagesSize,
   planContextProjection,
+  projectMessages,
 } from "./ContextProjection.sys.mjs";
 import { buildClientFromStore, isVisionModel } from "./providers.sys.mjs";
 import { conversationStore } from "./ConversationStore.sys.mjs";
@@ -412,6 +415,51 @@ export const agentSession = {
       s.aborted = true;
       void conversationStore.setThreadTurnStatus(threadId, "cancelled").catch(() => {});
       notify(s);
+    }
+  },
+  /**
+   * 二开 M6 /compact：手动压缩上下文。与自动投影同管线，但不等 120k 触发阈值——
+   * 立即让模型把 cutoff 之前的历史折叠成续写摘要并落库，之后 getModelMessages 自动带上投影。
+   * 跑回合中不允许（会和回合内的投影读写打架）。返回 {ok,...} 供 UI 直接展示。
+   */
+  async compactNow(threadId) {
+    const s = getOrInit(threadId);
+    if (s.running) {
+      return { ok: false, error: "当前回合正在执行，请先停止后再压缩" };
+    }
+    try {
+      const thread = await conversationStore.getThread(threadId);
+      const fullMessages = ((thread && thread.messages) || []).map(message => ({
+        role: message.role,
+        content: message.content,
+      }));
+      if (fullMessages.length < 3) {
+        return { ok: false, error: "对话内容太少，暂时不需要压缩" };
+      }
+      const client = buildClientFromStore(configStore);
+      const res = await compactConversation({
+        messages: fullMessages,
+        previous: thread && thread.contextProjection,
+        chat: (msgs, opts) => client.chat(msgs, opts),
+      });
+      if (!res.ok) {
+        return res;
+      }
+      await conversationStore.setContextProjection(threadId, res.projection);
+      s.contextProjected = true;
+      notify(s);
+      const beforeChars = messagesSize(fullMessages);
+      const afterChars = messagesSize(projectMessages(fullMessages, res.projection));
+      return {
+        ok: true,
+        cutoff: res.cutoff,
+        total: res.total,
+        foldedChars: res.foldedChars,
+        beforeChars,
+        afterChars,
+      };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
     }
   },
   /**

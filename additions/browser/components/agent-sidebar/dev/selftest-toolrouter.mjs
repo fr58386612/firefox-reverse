@@ -19,7 +19,7 @@ const ok = (cond, msg) => {
   }
 };
 
-// ── mock backends（N0 只接 page + code）──
+// ── mock backends（N0 只接 page + code；offer_choices 无 backend 依赖恒注册）──
 const pageBackend = {
   eval: async a => ({ type: "number", value: 42, expr: a.expression }),
 };
@@ -36,12 +36,12 @@ const router = new ToolRouter();
 router.registerAll(createBuiltinTools({ page: pageBackend, code: codeBackend }));
 const names = router.names().sort();
 ok(
-  JSON.stringify(names) === JSON.stringify(["code_search", "page_eval"]),
+  JSON.stringify(names) === JSON.stringify(["code_search", "offer_choices", "page_eval"]),
   `仅注册有 backend 的工具: ${JSON.stringify(names)}（page_navigate 因无 backend 被门控掉）`
 );
 const specs = router.listSpecs();
 ok(
-  specs.length === 2 &&
+  specs.length === 3 &&
     specs.every(s => s.type === "function" && s.function && s.function.name && s.function.parameters),
   "listSpecs() 形状符合 OpenAI tools"
 );

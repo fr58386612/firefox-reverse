@@ -179,3 +179,62 @@ export function buildProjectionInput(
     joined.slice(-tail)
   );
 }
+
+/**
+ * 手动压缩（M6 /compact）：与自动投影同一管线，只是不等触发阈值、强制找折叠边界。
+ * 纯函数——chat(messages, opts)→{content} 由调用方注入，Node 可测。
+ * 不直接写库：返回可直接交给 conversationStore.setContextProjection 的 projection。
+ */
+export async function compactConversation({
+  messages,
+  previous = null,
+  chat,
+  triggerChars = 0,
+  keepRecentChars = 20000,
+  minFoldChars = 1000,
+  maxTokens = 2048,
+} = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  if (typeof chat !== "function") {
+    return { ok: false, error: "缺少可用的模型客户端" };
+  }
+  const plan = planContextProjection(list, previous, { triggerChars, keepRecentChars });
+  if (!plan) {
+    return { ok: false, error: "对话还太短（或近期消息已全是最新内容），暂时不需要压缩" };
+  }
+  const foldedChars = messagesSize(list.slice(0, plan.cutoff));
+  if (foldedChars < minFoldChars) {
+    return { ok: false, error: "可折叠的早期历史太少，压缩收益不明显" };
+  }
+  const source = buildProjectionInput(list, plan);
+  const res = await chat(
+    [
+      { role: "system", content: CONTEXT_PROJECTION_PROMPT },
+      {
+        role: "user",
+        content: "Update the continuation record from this bounded source:\n\n" + source,
+      },
+    ],
+    { maxTokens }
+  );
+  const summary = String((res && res.content) || "").trim();
+  if (!summary) {
+    return { ok: false, error: "模型返回了空摘要，未改动原投影" };
+  }
+  const now = Date.now();
+  return {
+    ok: true,
+    cutoff: plan.cutoff,
+    total: list.length,
+    foldedChars,
+    projection: {
+      version: CONTEXT_PROJECTION_VERSION,
+      summary,
+      cutoff: plan.cutoff,
+      sourceCount: plan.cutoff,
+      createdAt: (plan.previous && plan.previous.createdAt) || now,
+      updatedAt: now,
+      strategy: "projected",
+    },
+  };
+}

@@ -1768,3 +1768,74 @@ body {
 .skills-pane__roots { margin: 10px 2px; font-size: 11px; }
 .skills-pane__rootpath { font-family: monospace; font-size: 10px; opacity: .8; word-break: break-all; }
 .settings-pane__mcpjson { width: 100%; font-family: monospace; font-size: 11px; resize: vertical; box-sizing: border-box; }
+
+/* ── 二开 M6：输入框斜杠命令菜单 ── */
+.agent-panel__input { flex-wrap: wrap; }
+.agent-panel__slash {
+  width: 100%;
+  order: -1; /* 菜单永远排在输入行上方 */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--in-content-border-color, ThreeDShadow);
+  border-radius: var(--frx-radius-md);
+  background: var(--in-content-page-background, Field);
+  box-shadow: var(--frx-shadow);
+  max-height: 168px;
+  overflow-y: auto;
+}
+.agent-panel__slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--frx-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-panel__slash-item:hover {
+  background: color-mix(in srgb, Highlight 14%, transparent);
+}
+.agent-panel__slash-item code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  color: var(--in-content-primary-button-background, Highlight);
+  white-space: nowrap;
+}
+.agent-panel__slash-item span { opacity: 0.75; }
+
+/* ── 二开 M6：上下文占用状态条 ── */
+.ctx-meter {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 6px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.ctx-meter__label { white-space: nowrap; opacity: 0.7; }
+.ctx-meter__track {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  overflow: hidden;
+}
+.ctx-meter__fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--frx-tool-ok);
+  transition: width 0.3s ease;
+}
+.ctx-meter.is-warm .ctx-meter__fill { background: var(--frx-tool-run); }
+.ctx-meter.is-hot .ctx-meter__fill { background: var(--frx-tool-err); }
+.ctx-meter__num { white-space: nowrap; font-variant-numeric: tabular-nums; opacity: 0.85; }

@@ -56,6 +56,32 @@ function normalizeProfile(raw = {}) {
   };
 }
 
+/** 二开 M5：MCP server 配置规范化。stdio={command,args,env,cwd}；http={url,headers}；name 净化成可拼工具名的形态。 */
+function normalizeMcpServer(raw = {}) {
+  const transport = raw.transport === "http" ? "http" : "stdio";
+  const name = String(raw.name || "")
+    .trim()
+    .replace(/[^A-Za-z0-9_.-]+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 40) || "mcp";
+  const strMap = v =>
+    v && typeof v === "object"
+      ? Object.fromEntries(Object.entries(v).slice(0, 32).map(([k, val]) => [String(k).slice(0, 80), String(val)]))
+      : {};
+  return {
+    id: String(raw.id || "mcp_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).slice(0, 60),
+    name,
+    transport,
+    command: String(raw.command || "").trim().slice(0, 500),
+    args: Array.isArray(raw.args) ? raw.args.map(x => String(x)).slice(0, 32) : [],
+    env: strMap(raw.env),
+    cwd: String(raw.cwd || "").trim().slice(0, 500),
+    url: String(raw.url || "").trim().slice(0, 500),
+    headers: strMap(raw.headers),
+    enabled: raw.enabled !== false,
+  };
+}
+
 /** 选择 storage backend：有 Services.prefs 用之，否则内存（仅供 Node 自测）。 */
 function makeBackend() {
   const S = globalThis.Services;
@@ -428,6 +454,40 @@ export class ConfigStore {
   }
   setPythonPath(p) {
     this.b.setString(PREF_PREFIX + "exec.python", p || "");
+  }
+
+  /* ── 二开 M5：外部 MCP server（stdio 子进程 / Streamable HTTP） ── */
+
+  listMcpServers() {
+    try {
+      const arr = JSON.parse(this.b.getString(PREF_PREFIX + "mcp.servers", "[]"));
+      if (!Array.isArray(arr)) return [];
+      return arr.map(normalizeMcpServer).filter(s => s.name && (s.transport === "http" ? s.url : s.command));
+    } catch {
+      return [];
+    }
+  }
+  setMcpServers(list) {
+    const clean = (Array.isArray(list) ? list : []).map(normalizeMcpServer);
+    this.b.setString(PREF_PREFIX + "mcp.servers", JSON.stringify(clean.slice(0, 16)));
+    return clean.slice(0, 16);
+  }
+
+  /* ── 二开 M5：技能禁用集（SkillsPane 开关；内置技能不受影响） ── */
+
+  getDisabledSkills() {
+    try {
+      const arr = JSON.parse(this.b.getString(PREF_PREFIX + "skills.disabled", "[]"));
+      return Array.isArray(arr) ? arr.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+  setSkillDisabled(name, disabled) {
+    const cur = new Set(this.getDisabledSkills());
+    if (disabled) cur.add(String(name));
+    else cur.delete(String(name));
+    this.b.setString(PREF_PREFIX + "skills.disabled", JSON.stringify([...cur]));
   }
 }
 

@@ -19,6 +19,7 @@ import { WorkspaceBackend } from "./WorkspaceBackend.sys.mjs";
 import { NotesBackend } from "./NotesBackend.sys.mjs";
 import { LedgerBackend } from "./LedgerBackend.sys.mjs";
 import { SkillBackend } from "./SkillBackend.sys.mjs";
+import { MCPBackend } from "./MCPBackend.sys.mjs";
 import { EnvironmentBackend } from "./EnvironmentBackend.sys.mjs";
 import { configStore } from "./ConfigStore.sys.mjs";
 
@@ -50,7 +51,13 @@ export function getBackends() {
   // 引擎每轮+压缩后整本注入上下文（治压缩后重新发现/重走死路）。remember 工具写、digest 注入、mergeHandoff 自动沉淀。
   const ledger = new LedgerBackend({ workspace });
   // 通用 SkillRegistry：内置逆向方法论 + 用户/工作区 SKILL.md；正文按需读取。
-  const skill = new SkillBackend({ workspace }); // 无参数 skill_get 仍释放原内置脚手架
+  // 二开 M5：SkillsPane/禁用集——isDisabled 每次现取（改配置即时生效），内置技能由 registry 内部豁免。
+  const skill = new SkillBackend({
+    workspace,
+    isDisabled: () => new Set(configStore.getDisabledSkills ? configStore.getDisabledSkills() : []),
+  }); // 无参数 skill_get 仍释放原内置脚手架
+  // 二开 M5：MCP 客户端后端。连接是惰性的（首个回合 syncRouter 才拉起子进程/连 HTTP）。
+  const mcp = new MCPBackend({ config: configStore });
   // 环境管理：一个环境一个 profile + 一个独立 Firefox 进程。UI 和 MCP 共用同一套 env manifest。
   const env = new EnvironmentBackend();
   // Firefox 扩展生命周期：AMO 搜索 + AddonManager 安装/启停/卸载/配置页。
@@ -198,6 +205,6 @@ export function getBackends() {
     },
   };
 
-  _singleton = { page, net, scripts, code, jsvmp, webapi, workspace, notes, ledger, skill, env, addons, find, cookies };
+  _singleton = { page, net, scripts, code, jsvmp, webapi, workspace, notes, ledger, skill, mcp, env, addons, find, cookies };
   return _singleton;
 }

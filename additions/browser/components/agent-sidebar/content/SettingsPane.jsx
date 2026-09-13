@@ -16,7 +16,7 @@ function legacyProfile(store, providers) {
 }
 
 /** 模型配置管理：同一 provider 可保存多组账号/端点，选择历史配置即可切换。 */
-export default function SettingsPane({ store, providers, fetchModels, onClose }) {
+export default function SettingsPane({ store, providers, fetchModels, mcp, onClose }) {
   const initialProfiles = store.listModelProfiles
     ? store.listModelProfiles()
     : [legacyProfile(store, providers)];
@@ -47,6 +47,53 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
   const [manual, setManual] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  // 二开 M5：MCP server 配置（整表 JSON 编辑，兼容 Claude Desktop 的 mcpServers 映射格式）。
+  const [mcpJson, setMcpJson] = useState(() => {
+    try {
+      const cur = store.listMcpServers ? store.listMcpServers() : [];
+      return JSON.stringify(cur.length ? cur : [{ name: "example", transport: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-everything"], enabled: false }], null, 2);
+    } catch {
+      return "[]";
+    }
+  });
+  const [mcpMsg, setMcpMsg] = useState("");
+  const [mcpBusy, setMcpBusy] = useState(false);
+
+  function saveMcp() {
+    setMcpMsg("");
+    try {
+      let data = JSON.parse(mcpJson);
+      // 兼容 Claude Desktop 格式：{"mcpServers": {"名字": {"command":...}}}
+      if (!Array.isArray(data) && data && data.mcpServers && typeof data.mcpServers === "object") {
+        data = Object.entries(data.mcpServers).map(([name, v]) => ({ name, ...v }));
+      }
+      if (!Array.isArray(data)) throw new Error('需为数组或 {"mcpServers":{...}} 映射');
+      const saved = store.setMcpServers(data);
+      setMcpJson(JSON.stringify(saved, null, 2));
+      setMcpMsg(`已保存 ${saved.length} 个 server；下一回合自动连接`);
+    } catch (e) {
+      setMcpMsg("保存失败：" + ((e && e.message) || e));
+    }
+  }
+
+  async function testMcp() {
+    if (!mcp || mcpBusy) return;
+    setMcpBusy(true);
+    setMcpMsg("连接中…（stdio 会拉起子进程）");
+    try {
+      saveMcp();
+      mcp.disposeAll();
+      const r = await mcp.ensureConnected(true);
+      const st = mcp.status().filter(s => s.enabled);
+      const detail = st.map(s => `${s.name}:${s.connected ? "✓" + s.toolCount + "工具" : "✗" + (s.error || "未连")}`).join("  ");
+      setMcpMsg(detail || "没有启用的 MCP server");
+      void r;
+    } catch (e) {
+      setMcpMsg("测试失败：" + ((e && e.message) || e));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
 
   const current = providers.find(p => p.id === provider) || providers[0];
   const isCustom = provider === "custom";
@@ -370,6 +417,28 @@ export default function SettingsPane({ store, providers, fetchModels, onClose })
         </label>
         <span className="settings-pane__hint">不勾选则对应能力对 Agent 隐藏，避免向不支持多模态的模型发送图片导致报错。</span>
       </section>
+
+      {mcp && (
+        <section className="settings-pane__section">
+          <div className="settings-pane__section-title">MCP 服务器（外部工具接入）</div>
+          <textarea
+            className="settings-pane__mcpjson"
+            value={mcpJson}
+            spellCheck={false}
+            rows={7}
+            onChange={e => { setMcpJson(e.target.value); setMcpMsg(""); }}
+          />
+          <span className="settings-pane__hint">
+            每项：stdio 用 {"{ name, command, args, env, cwd }"}；远程用 {"{ name, transport: \"http\", url, headers }"}。
+            兼容 Claude Desktop 的 {"mcpServers"} 映射直接粘贴。启用的 server 工具会以 mcp__服务名__工具名 出现给模型。
+          </span>
+          <div className="settings-pane__actions">
+            <button type="button" onClick={saveMcp}>保存 MCP 配置</button>
+            <button type="button" onClick={testMcp} disabled={mcpBusy}>{mcpBusy ? "测试中…" : "测试连接"}</button>
+            {mcpMsg && <span className="settings-pane__saved">{mcpMsg}</span>}
+          </div>
+        </section>
+      )}
 
       {error && <div className="settings-pane__error">{error}</div>}
       <div className="settings-pane__actions">

@@ -470,6 +470,13 @@ export const agentSession = {
         dynamicContext = String(dynamicContext || "") + "\n\n" + CANCELLED_TURN_BOUNDARY;
       }
       const client = buildClientFromStore(configStore);
+      // 二开 M5：回合前把已启用 MCP server 的工具挂进共享 router（幂等；失败/超时不阻断回合，
+      // 坏 server 有 60s 失败冷却）。注册的工具名 mcp__<server>__<tool>，随工具列表自动下发模型。
+      try {
+        await getBackends().mcp.syncRouter(router());
+      } catch {
+        /* MCP 全挂也只是少一批工具，对话照常 */
+      }
       const activeProfile =
         (configStore.getActiveModelProfile && configStore.getActiveModelProfile()) || null;
       const cacheKey = [

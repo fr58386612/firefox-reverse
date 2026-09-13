@@ -817,6 +817,24 @@ function toolTable() {
       b => b.skill && b.skill.readResource,
       (b, a, ctx) => b.skill.readResource(a, ctx)
     ),
+    T(
+      "save_skill",
+      "【沉淀技能】把本轮**验证过**的可复用方法/脚本/流程写成一个 Skill（写到 ~/.firefox-reverse/skills/<name>/SKILL.md），" +
+        "下次 skill_list 可见、任务匹配时还会自动注入上下文。写什么：一套跑通过的算法还原流程、一个站点的绕签套路、" +
+        "一段验证过的补环境配方。**只在结论已被实测验证时写**（同 notes_add 的自律）。同名默认拒绝，overwrite:true 覆盖。",
+      {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "skill 名：小写字母/数字/连字符（如 douyin-sign-flow）" },
+          description: { type: "string", description: "一句话说清「什么时候该用它」（≤500字）；决定自动匹配命中率" },
+          content: { type: "string", description: "Markdown 正文：步骤、关键代码、验证方法、已知坑。可自带 frontmatter（缺了自动按 name/description 补）" },
+          overwrite: { type: "boolean", description: "同名时是否覆盖，默认 false" },
+        },
+        required: ["name", "description", "content"],
+      },
+      b => b.skill && b.skill.saveSkill,
+      (b, a, ctx) => b.skill.saveSkill(a, ctx)
+    ),
 
     // ───────── ⑨ 逆向进展笔记（跨会话按站点记"验证过的突破点/坑"） ─────────
     T(

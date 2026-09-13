@@ -1752,3 +1752,19 @@ body {
 }
 .msg__choices-custom button { cursor: pointer; padding: 4px 10px; }
 .msg__choices-custom button:disabled { opacity: 0.45; cursor: default; }
+
+/* ── 二开 M5：技能库面板 + MCP 设置 ─────────────────────────────── */
+.skills-pane__item { border-bottom: 1px solid var(--in-content-border-color, rgba(128,128,128,.25)); padding: 6px 2px; }
+.skills-pane__item.is-disabled { opacity: .55; }
+.skills-pane__row { display: flex; align-items: center; gap: 6px; }
+.skills-pane__toggle { display: inline-flex; align-items: center; margin: 0; }
+.skills-pane__name { flex: 1; display: flex; align-items: center; gap: 6px; text-align: left; background: none; border: 0; padding: 2px 0; font-weight: 600; color: inherit; cursor: pointer; }
+.skills-pane__src { font-size: 10px; font-weight: 400; padding: 1px 5px; border-radius: 6px; background: var(--in-content-button-background, rgba(128,128,128,.18)); }
+.skills-pane__desc { margin: 2px 0 0 24px; font-size: 11px; color: var(--in-content-text-color, inherit); opacity: .75; white-space: pre-wrap; }
+.skills-pane__editor { margin-top: 6px; }
+.skills-pane__textarea { width: 100%; min-height: 160px; font-family: monospace; font-size: 11px; resize: vertical; box-sizing: border-box; }
+.skills-pane__editorbar { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.skills-pane__hint { font-size: 11px; opacity: .75; }
+.skills-pane__roots { margin: 10px 2px; font-size: 11px; }
+.skills-pane__rootpath { font-family: monospace; font-size: 10px; opacity: .8; word-break: break-all; }
+.settings-pane__mcpjson { width: 100%; font-family: monospace; font-size: 11px; resize: vertical; box-sizing: border-box; }

@@ -99,9 +99,19 @@ function pathInside(root, candidate) {
 }
 
 export class SkillRegistry {
-  constructor({ workspace } = {}) {
+  constructor({ workspace, isDisabled } = {}) {
     this._builtinCache = null;
     this._workspace = workspace || null;
+    // 二开 M5：禁用集由外部（ConfigStore）注入、每次现取——SkillsPane 改开关即时生效。
+    this._isDisabled = typeof isDisabled === "function" ? isDisabled : () => new Set();
+  }
+
+  _disabledSet() {
+    try {
+      return this._isDisabled() instanceof Set ? this._isDisabled() : new Set(this._isDisabled() || []);
+    } catch {
+      return new Set();
+    }
   }
 
   async _readChrome(url) {
@@ -208,7 +218,7 @@ export class SkillRegistry {
     return found;
   }
 
-  async _catalog(ctx) {
+  async _catalog(ctx, { includeDisabled = false } = {}) {
     const map = new Map();
     map.set(BUILTIN_NAME, {
       name: BUILTIN_NAME,
@@ -223,12 +233,17 @@ export class SkillRegistry {
         }
       }
     }
-    return [...map.values()];
+    const disabled = this._disabledSet();
+    return [...map.values()].filter(s => {
+      const off = s.source !== "builtin" && disabled.has(s.name);
+      s.disabled = off;
+      return includeDisabled || !off;
+    });
   }
 
   async list(_params = {}, ctx = {}) {
     try {
-      const skills = await this._catalog(ctx);
+      const skills = await this._catalog(ctx, { includeDisabled: !!_params.includeDisabled });
       return {
         ok: true,
         count: skills.length,
@@ -304,7 +319,7 @@ export class SkillRegistry {
       let name = String(params.name || BUILTIN_NAME).trim();
       const builtinAlias = ["reverse", "skill-reverse", "builtin"].includes(name);
       if (builtinAlias) name = BUILTIN_NAME;
-      const catalog = await this._catalog(ctx);
+      const catalog = await this._catalog(ctx, { includeDisabled: true });
       // 无参数是公开兼容契约：即使本地存在同名 Skill，也必须返回原内置方法论。
       const descriptor = legacyDefault || builtinAlias
         ? {
@@ -316,6 +331,9 @@ export class SkillRegistry {
         : catalog.find(s => s.name === name);
       if (!descriptor) {
         return { ok: false, error: `未找到 Skill "${name}"；先调用 skill_list 查看可用名称` };
+      }
+      if (descriptor.disabled && !params.includeDisabled) {
+        return { ok: false, error: `Skill "${name}" 已被用户在技能面板禁用；需要时先到侧边栏「技能」里启用` };
       }
       if (descriptor.source === "builtin") {
         const fullSkill = await this._readBuiltin();
@@ -386,6 +404,118 @@ export class SkillRegistry {
       };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  /* ───────────── 二开 M5：技能沉淀 / 管理 / 按任务匹配 ───────────── */
+
+  /** 把一轮经验写成 ~/.firefox-reverse/skills/<name>/SKILL.md（save_skill 工具的后端）。 */
+  async saveSkill(params = {}, ctx = {}) {
+    try {
+      if (typeof IOUtils === "undefined" || typeof PathUtils === "undefined") {
+        return { ok: false, error: "保存 Skill 需要浏览器环境（IOUtils 不可用）" };
+      }
+      const name = String(params.name || "").trim().toLowerCase();
+      if (!validSkillName(name)) {
+        return { ok: false, error: "名称需为 1-64 位小写字母/数字/连字符（如 sign-audit-flow）" };
+      }
+      const description = String(params.description || "").replace(/\s+/g, " ").trim().slice(0, 500);
+      let content = String(params.content || "").replace(/^\uFEFF/, "");
+      if (!content.trim()) return { ok: false, error: "content 正文不能为空" };
+      if (content.length > MAX_SKILL_CHARS) return { ok: false, error: `正文超过 ${Math.floor(MAX_SKILL_CHARS / 1024)}KB` };
+      const home = this._homeDir();
+      if (!home) return { ok: false, error: "无法定位用户主目录" };
+      const dir = PathUtils.join(home, ".firefox-reverse", "skills", name);
+      const skillPath = PathUtils.join(dir, "SKILL.md");
+      let exists = false;
+      try { exists = (await IOUtils.stat(skillPath)).type === "regular"; } catch { /* fresh */ }
+      if (exists && !params.overwrite) {
+        return { ok: false, error: `Skill "${name}" 已存在；确认覆盖请传 overwrite:true` };
+      }
+      // 正文自带 frontmatter 就不重复包；否则按 name/description 自动补一份。
+      const hasFront = /^---\r?\n/.test(content);
+      const text = hasFront
+        ? content
+        : `---\nname: ${name}\ndescription: ${description || `沉淀技能：${name}`}\n---\n\n${content.trim()}\n`;
+      await IOUtils.makeDirectory(dir, { ignoreExisting: true, createAncestors: true });
+      await IOUtils.writeUTF8(skillPath, text);
+      return {
+        ok: true,
+        name,
+        description: description || `沉淀技能：${name}`,
+        path: skillPath,
+        chars: text.length,
+        note: exists ? "已覆盖旧版" : `已保存；skill_list 可见，任务匹配时还会自动注入（SkillsPane 可管理）`,
+      };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  /** SkillsPane 编辑保存：整文覆盖写回原 SKILL.md（内置不可编辑；工作区 skill 允许改）。 */
+  async updateSkill(params = {}, ctx = {}) {
+    try {
+      if (typeof IOUtils === "undefined") return { ok: false, error: "需要浏览器环境" };
+      const name = String(params.name || "").trim();
+      const text = String(params.content || "");
+      if (!text.trim()) return { ok: false, error: "content 不能为空" };
+      if (text.length > MAX_SKILL_CHARS) return { ok: false, error: "正文过大" };
+      const d = (await this._catalog(ctx, { includeDisabled: true })).find(s => s.name === name);
+      if (!d) return { ok: false, error: `未找到 Skill "${name}"` };
+      if (d.source === "builtin") return { ok: false, error: "内置 Skill 不可编辑" };
+      await IOUtils.writeUTF8(d.path, text);
+      return { ok: true, name, path: d.path, chars: text.length };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  /** SkillsPane 删除：移除整个 skill 目录（仅限本地目录发现的可写 skill）。 */
+  async deleteSkill(params = {}, ctx = {}) {
+    try {
+      if (typeof IOUtils === "undefined" || typeof PathUtils === "undefined") return { ok: false, error: "需要浏览器环境" };
+      const name = String(params.name || "").trim();
+      const d = (await this._catalog(ctx, { includeDisabled: true })).find(s => s.name === name);
+      if (!d) return { ok: false, error: `未找到 Skill "${name}"` };
+      if (d.source === "builtin") return { ok: false, error: "内置 Skill 不可删除" };
+      await IOUtils.remove(d.root, { recursive: true });
+      return { ok: true, name, removed: d.root };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  /**
+   * 按任务文本挑最相关的用户技能（内置方法论除外——它由 skill_get 手动取，避免每轮轰炸上下文）。
+   * 打分：名字（含按 - 拆的词）出现 +3/+1；description 里的短语（≥2 字）逐条命中 +2。
+   * 阈值 2 分、最多返回 3 个。宁可漏注入不误注入：漏了模型还能自己 skill_list。
+   */
+  async matchTask(params = {}, ctx = {}) {
+    try {
+      const task = String(params.text || "").toLowerCase();
+      if (task.length < 4) return { ok: true, matches: [] };
+      const skills = (await this._catalog(ctx)).filter(s => s.source !== "builtin");
+      const scored = [];
+      for (const s of skills) {
+        let score = 0;
+        const name = s.name.toLowerCase();
+        if (name.length >= 3 && task.includes(name)) score += 3;
+        for (const w of name.split("-").filter(x => x.length >= 3)) {
+          if (task.includes(w)) score += 1;
+        }
+        const phrases = String(s.description || "")
+          .toLowerCase()
+          .split(/[\s,，。.;；、/()（）\[\]|-]+/)
+          .filter(p => p.length >= 2);
+        for (const p of phrases) {
+          if (task.includes(p)) score += 2;
+        }
+        if (score >= 2) scored.push({ name: s.name, description: s.description, source: s.source, score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      return { ok: true, matches: scored.slice(0, 3) };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e), matches: [] };
     }
   }
 }

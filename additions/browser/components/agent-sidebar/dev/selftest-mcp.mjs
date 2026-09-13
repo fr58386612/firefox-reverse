@@ -2,7 +2,7 @@
 /* selftest-mcp.mjs — 二开 M5：MCP 客户端协议层 + 工具注册 + 配置规范化自测。
  * 内存假 MCP server（JSON-RPC over 行协议）驱动真实 MCPClient/MCPBackend/ToolRouter/ConfigStore。
  */
-import { MCPJsonRpc, MCPClient, MCPBackend, mcpToolKey } from "../modules/MCPBackend.sys.mjs";
+import { MCPJsonRpc, MCPClient, MCPBackend, mcpToolKey, resolveCommand, normalizePathEnv } from "../modules/MCPBackend.sys.mjs";
 import { ConfigStore } from "../modules/ConfigStore.sys.mjs";
 import { ToolRouter } from "../modules/ToolRouter.sys.mjs";
 
@@ -162,6 +162,51 @@ const TOOLS = [
   cs.setSkillDisabled("def", true);
   cs.setSkillDisabled("abc", false);
   ok(JSON.stringify(cs.getDisabledSkills()) === JSON.stringify(["def"]), "禁用集增删生效");
+}
+
+/* ── 安装版修复回归：Gecko pathSearch 大小写敏感地读 environment.PATH ──
+ * Explorer 启动（双击/开始菜单 = 安装版）的进程环境块主键名是 "Path"（注册表值名），
+ * 只有 shell 启动才常见 "PATH"；subprocess_win.sys.mjs 只认大写 → dirs 为空、
+ * 全部候选落空（用户报错里的 ".COM" 就是第一个候选）。 */
+{
+  globalThis.PathUtils = globalThis.PathUtils || {
+    isAbsolute: p => /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/"),
+    join: (...x) => x.join("\\"),
+  };
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { platform: "Win32" },
+  });
+  const NPM = "C:\\Users\\pc\\AppData\\Roaming\\npm";
+  const fakeGecko = {
+    async pathSearch(bin, env) {
+      if (/^[a-zA-Z]:[\\/]/.test(bin)) return bin; // 绝对路径：存在性检查（简化为通过）
+      const dirs = env && typeof env.PATH === "string" ? env.PATH.split(";") : [];
+      for (const d of dirs) {
+        if (/npm$/i.test(d) && /^dbx-mcp-server(\.cmd)?$/i.test(bin)) {
+          return `${NPM}\\dbx-mcp-server.cmd`;
+        }
+      }
+      const err = new Error(`Executable not found: ${bin}`);
+      err.errorCode = 15;
+      throw err;
+    },
+  };
+  const explorerEnv = { Path: `C:\\Windows;${NPM}`, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+
+  let threw = "";
+  try { await resolveCommand(fakeGecko, "dbx-mcp-server", explorerEnv); } catch (e) { threw = e.message; }
+  ok(/dbx-mcp-server\.COM/.test(threw), `未归一的 "Path" 键名 → 候选全落空、首个错误是 .COM（复现安装版 bug：${threw}）`);
+
+  const hit = await resolveCommand(fakeGecko, "dbx-mcp-server", normalizePathEnv(explorerEnv));
+  ok(/dbx-mcp-server\.cmd$/i.test(hit), `normalizePathEnv 后命中 .cmd（${hit}）`);
+
+  const shellEnv = { PATH: `C:\\Windows;${NPM}`, PATHEXT: explorerEnv.PATHEXT };
+  const hit2 = await resolveCommand(fakeGecko, "dbx-mcp-server", normalizePathEnv(shellEnv));
+  ok(/\.cmd$/i.test(hit2), "已是大写 PATH 时 normalize 不干扰（开发版 shell 启动路径）");
+
+  const abs = await resolveCommand(fakeGecko, `${NPM}\\dbx-mcp-server.cmd`, explorerEnv);
+  ok(/dbx-mcp-server\.cmd$/.test(abs), "绝对路径命令直接透传");
 }
 
 console.log(fail ? `\nmcp selftest: ${fail} FAILED` : "\nmcp selftest: ALL PASS");

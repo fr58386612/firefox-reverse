@@ -223,10 +223,25 @@ function isWindowsPlatform() {
   return _isWin;
 }
 
+// Windows 环境块键名大小写不稳定：从 Explorer/注册表启动（双击、开始菜单，即安装版）时
+// 主键叫 "Path"；从 shell 启动才常见 "PATH"。而 Gecko 的 pathSearch 大小写敏感地读
+// environment.PATH/PATHEXT（subprocess_win.sys.mjs），拿不到就当 PATH 为空 → 全盘找不到。
+// 传给 pathSearch 前补一份大写别名，两种启动方式行为一致。
+export function normalizePathEnv(env) {
+  if (!isWindowsPlatform()) return env;
+  const out = Object.assign({}, env);
+  for (const key of ["PATH", "PATHEXT"]) {
+    if (out[key] !== undefined) continue;
+    const hit = Object.keys(out).find(k => k.toUpperCase() === key);
+    if (hit) out[key] = out[hit];
+  }
+  return out;
+}
+
 // Subprocess.call 不搜 PATH：command 必须是绝对路径（裸名一律 "does not exist"），
 // 而且 Windows 的 pathSearch 会先命中 npm 无扩展名的 bash shim。这里优先按
 // PATHEXT 找 .cmd/.exe 版本，最后才接受无扩展名文件。
-async function resolveCommand(Subprocess, command, env) {
+export async function resolveCommand(Subprocess, command, env) {
   if (isWindowsPlatform() && !PathUtils.isAbsolute(command) && !/\.[a-z0-9]+$/i.test(command)) {
     const exts = String(env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
     let firstErr = null;
@@ -256,6 +271,7 @@ async function connectStdio(server) {
   let resolveEnv = {};
   try { resolveEnv = Subprocess.getEnvironment(); } catch { /* 极端环境拿不到就走 env 里的 PATH */ }
   Object.assign(resolveEnv, envObj);
+  resolveEnv = normalizePathEnv(resolveEnv);
   let spawnCommand;
   try {
     spawnCommand = await resolveCommand(Subprocess, server.command, resolveEnv);

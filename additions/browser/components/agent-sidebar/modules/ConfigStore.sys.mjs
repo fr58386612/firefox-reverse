@@ -467,10 +467,107 @@ export class ConfigStore {
       return [];
     }
   }
+  /** 原样返回已存条目（不过滤）——设置页据此显示，坏条目可见可修，不会"保存后凭空消失"。 */
+  listMcpServersRaw() {
+    try {
+      const arr = JSON.parse(this.b.getString(PREF_PREFIX + "mcp.servers", "[]"));
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
   setMcpServers(list) {
     const clean = (Array.isArray(list) ? list : []).map(normalizeMcpServer);
     this.b.setString(PREF_PREFIX + "mcp.servers", JSON.stringify(clean.slice(0, 16)));
     return clean.slice(0, 16);
+  }
+  /**
+   * 二开修复：把用户粘贴的任意常见 MCP 配置宽容解析成可保存列表。
+   * 支持：数组 / {"mcpServers"|"servers":{...}} 映射 / 单个 server 对象；
+   * 字段别名：type↔transport、serverUrl|endpoint|uri↔url、cmd|bin↔command、
+   * arguments↔args、environment↔env、httpHeaders↔headers；自动拆包一层嵌套
+   * config|server|params|data|options。
+   * 关键：**逐条校验**（name 必须是 ASCII；stdio 必须有 command、http 必须有 url），
+   * 有任何错误就不产出列表——杜绝旧版把格式不对的条目静默存成空壳（name 兜底 "mcp"、command/url 全空）。
+   * @returns {{servers: Array, errors: string[]}}
+   */
+  parseMcpInput(input) {
+    const data = typeof input === "string" ? JSON.parse(input) : input;
+    let list;
+    if (Array.isArray(data)) {
+      list = data;
+    } else if (data && typeof data === "object") {
+      const map = data.mcpServers || data.servers || data.mcp_servers;
+      if (map && typeof map === "object" && !Array.isArray(map)) {
+        list = Object.entries(map).map(([name, v]) => ({
+          name,
+          ...(v && typeof v === "object" ? v : {}),
+        }));
+      } else {
+        list = [data];
+      }
+    } else {
+      return { servers: [], errors: ["配置需为数组、{\"mcpServers\":{…}} 映射或单个 server 对象"] };
+    }
+    const errors = [];
+    const servers = [];
+    list.slice(0, 16).forEach((item, i) => {
+      const label = `第 ${i + 1} 条`;
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        errors.push(`${label}：不是 JSON 对象`);
+        return;
+      }
+      let raw = item;
+      for (const nestKey of ["config", "server", "params", "data", "options"]) {
+        const inner = raw[nestKey];
+        if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+          raw = { ...raw, ...inner };
+          break;
+        }
+      }
+      const name = String(raw.name || raw.serverName || "").trim();
+      const url = String(raw.url || raw.serverUrl || raw.server_url || raw.endpoint || raw.uri || "").trim();
+      const command = String(raw.command || raw.cmd || raw.bin || raw.executable || "").trim();
+      const typeStr = String(raw.transport || raw.type || "").trim().toLowerCase();
+      let transport;
+      if (/http|sse|streamable/.test(typeStr)) transport = "http";
+      else if (/stdio/.test(typeStr)) transport = "stdio";
+      else transport = url && !command ? "http" : "stdio";
+      if (!name) {
+        errors.push(`${label}：缺少 name`);
+        return;
+      }
+      if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
+        errors.push(`${label} "${name}"：name 需为 ASCII（字母/数字/-_ .），如 my-server`);
+        return;
+      }
+      if (transport === "http" ? !/^https?:\/\//i.test(url) : !command) {
+        errors.push(
+          transport === "http"
+            ? `${label} "${name}"：http 传输缺少合法 url（需 http(s):// 开头）`
+            : `${label} "${name}"：stdio 传输缺少 command（如 npx / node / uvx）`
+        );
+        return;
+      }
+      servers.push(
+        normalizeMcpServer({
+          id: raw.id,
+          name,
+          transport,
+          command,
+          args: raw.args || raw.arguments,
+          env: raw.env || raw.environment,
+          cwd: raw.cwd || raw.workingDirectory,
+          url,
+          headers: raw.headers || raw.httpHeaders || raw.requestHeaders,
+          enabled: raw.enabled !== false,
+        })
+      );
+    });
+    if (Array.isArray(data) && data.length > 16) {
+      errors.push(`最多支持 16 个 server（当前 ${data.length} 个）`);
+    }
+    return errors.length ? { servers: [], errors } : { servers, errors: [] };
   }
 
   /* ── 二开 M5：技能禁用集（SkillsPane 开关；内置技能不受影响） ── */

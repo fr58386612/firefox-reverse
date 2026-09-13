@@ -50,7 +50,7 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
   // 二开 M5：MCP server 配置（整表 JSON 编辑，兼容 Claude Desktop 的 mcpServers 映射格式）。
   const [mcpJson, setMcpJson] = useState(() => {
     try {
-      const cur = store.listMcpServers ? store.listMcpServers() : [];
+      const cur = store.listMcpServersRaw ? store.listMcpServersRaw() : (store.listMcpServers ? store.listMcpServers() : []);
       return JSON.stringify(cur.length ? cur : [{ name: "example", transport: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-everything"], enabled: false }], null, 2);
     } catch {
       return "[]";
@@ -62,17 +62,28 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
   function saveMcp() {
     setMcpMsg("");
     try {
-      let data = JSON.parse(mcpJson);
-      // 兼容 Claude Desktop 格式：{"mcpServers": {"名字": {"command":...}}}
-      if (!Array.isArray(data) && data && data.mcpServers && typeof data.mcpServers === "object") {
-        data = Object.entries(data.mcpServers).map(([name, v]) => ({ name, ...v }));
+      // 二开修复：走 store.parseMcpInput 宽容解析（数组/mcpServers 映射/单对象；
+      // type/serverUrl/cmd 等别名；嵌套 config 拆包）+ 逐条校验。任何一条不合法就
+      // 拒绝整批保存并逐条报错——旧版直接 setMcpServers 会把格式不对的条目静默
+      // 存成空壳（name 兜底 "mcp"、command/url 全空），这就是"一保存内容就变空"的根因。
+      const parsed = store.parseMcpInput
+        ? store.parseMcpInput(mcpJson)
+        : { servers: JSON.parse(mcpJson), errors: [] };
+      if (parsed.errors && parsed.errors.length) {
+        setMcpMsg("保存失败（未改动原配置）： " + parsed.errors.join("　｜　"));
+        return false;
       }
-      if (!Array.isArray(data)) throw new Error('需为数组或 {"mcpServers":{...}} 映射');
-      const saved = store.setMcpServers(data);
+      if (!parsed.servers.length) {
+        setMcpMsg('保存失败：至少需要 1 个 server。示例：{"mcpServers":{"everything":{"command":"npx","args":["-y","@modelcontextprotocol/server-everything"]}}}');
+        return false;
+      }
+      const saved = store.setMcpServers(parsed.servers);
       setMcpJson(JSON.stringify(saved, null, 2));
       setMcpMsg(`已保存 ${saved.length} 个 server；下一回合自动连接`);
+      return true;
     } catch (e) {
-      setMcpMsg("保存失败：" + ((e && e.message) || e));
+      setMcpMsg("保存失败：JSON 解析错误—— " + ((e && e.message) || e));
+      return false;
     }
   }
 
@@ -81,7 +92,7 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
     setMcpBusy(true);
     setMcpMsg("连接中…（stdio 会拉起子进程）");
     try {
-      saveMcp();
+      if (!saveMcp()) return; // 校验没过就不要动连接池
       mcp.disposeAll();
       const r = await mcp.ensureConnected(true);
       const st = mcp.status().filter(s => s.enabled);
@@ -430,7 +441,8 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
           />
           <span className="settings-pane__hint">
             每项：stdio 用 {"{ name, command, args, env, cwd }"}；远程用 {"{ name, transport: \"http\", url, headers }"}。
-            兼容 Claude Desktop 的 {"mcpServers"} 映射直接粘贴。启用的 server 工具会以 mcp__服务名__工具名 出现给模型。
+            兼容 Claude Desktop 的 {"mcpServers"} 映射、单个 server 对象、type/serverUrl/cmd 等常见别名与 config 嵌套写法直接粘贴。
+            保存时逐条校验：缺 command/url 或 name 含非 ASCII 字符会明确指出第几条哪里不对，不会存成空壳。
           </span>
           <div className="settings-pane__actions">
             <button type="button" onClick={saveMcp}>保存 MCP 配置</button>

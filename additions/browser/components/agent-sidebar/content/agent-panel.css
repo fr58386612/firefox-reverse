@@ -1839,3 +1839,6 @@ body {
 .ctx-meter.is-warm .ctx-meter__fill { background: var(--frx-tool-run); }
 .ctx-meter.is-hot .ctx-meter__fill { background: var(--frx-tool-err); }
 .ctx-meter__num { white-space: nowrap; font-variant-numeric: tabular-nums; opacity: 0.85; }
+
+/* 二开修复：技能库导入按钮组 */
+.skills-pane__actions { display: flex; gap: 6px; margin-left: auto; }

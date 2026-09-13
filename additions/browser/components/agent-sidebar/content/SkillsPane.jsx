@@ -100,12 +100,62 @@ export default function SkillsPane({ skill, store, workspace, onClose }) {
     }
   }
 
+  // 二开修复：导入技能——nsIFilePicker 选 .md 文件或技能目录（chrome 特权文档可直接用）。
+  function pickPath(mode, title) {
+    try {
+      const Cc = typeof Components !== "undefined" ? Components.classes : null;
+      const Ci = typeof Components !== "undefined" ? Components.interfaces : null;
+      const Sv = typeof Services !== "undefined" ? Services : null;
+      if (!Cc || !Ci || !Sv) throw new Error("文件选择器不可用");
+      const host =
+        (window.browsingContext && window.browsingContext.topChromeWindow) ||
+        Sv.wm.getMostRecentWindow("navigator:browser");
+      const fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+      fp.init(
+        host.browsingContext,
+        title,
+        mode === "dir" ? Ci.nsIFilePicker.modeGetFolder : Ci.nsIFilePicker.modeGetFile
+      );
+      if (mode !== "dir") fp.appendFilter("技能文件 (*.md)", "*.md;*.markdown;*.txt");
+      const res = fp.show();
+      return res === Ci.nsIFilePicker.returnOK ? fp.file.path : null;
+    } catch (e) {
+      setError("打开文件选择器失败：" + ((e && e.message) || e));
+      return null;
+    }
+  }
+
+  async function addImport(mode) {
+    setError("");
+    setMsg("");
+    const path = pickPath(mode, mode === "dir" ? "选择技能目录（内含 SKILL.md）" : "选择技能文件（.md）");
+    if (!path) return;
+    try {
+      let r = await skill.importSkill({ path }, { workspaceRoot: wsRoot || null });
+      if (r && r.needOverwrite && r.name && window.confirm(`技能“${r.name}”已存在，覆盖它？`)) {
+        r = await skill.importSkill({ path, overwrite: true }, { workspaceRoot: wsRoot || null });
+      }
+      if (r && r.ok) {
+        setMsg(r.note + (r.copiedResources ? `（附带 ${r.copiedResources} 个资源目录）` : ""));
+        void reload();
+      } else {
+        setMsg("导入失败：" + ((r && r.error) || "未知错误"));
+      }
+    } catch (e) {
+      setMsg("导入失败：" + ((e && e.message) || e));
+    }
+  }
+
   const SOURCE_LABEL = { builtin: "内置", user: "用户", workspace: "工作区" };
 
   return (
     <div className="settings-pane skills-pane">
       <header className="settings-pane__bar">
         <span>技能库</span>
+        <span className="skills-pane__actions">
+          <button type="button" className="settings-pane__btn-ghost" onClick={() => void addImport("dir")} title="导入技能文件夹（含 SKILL.md；references/assets 等资源目录一并复制）">导入技能文件夹</button>
+          <button type="button" className="settings-pane__btn-ghost" onClick={() => void addImport("file")} title="便捷导入：单个 .md 文件（frontmatter 缺 name 时按文件名取名）">导入单文件</button>
+        </span>
         {onClose && <button type="button" onClick={onClose} title="关闭">×</button>}
       </header>
 
@@ -116,6 +166,7 @@ export default function SkillsPane({ skill, store, workspace, onClose }) {
 
       {loading && <div className="skills-pane__hint">读取中…</div>}
       {error && <div className="settings-pane__error">{error}</div>}
+      {msg && <div className="skills-pane__hint">{msg}</div>}
 
       {skills.map(s => (
         <div key={s.source + "/" + s.name} className={"skills-pane__item" + (s.disabled ? " is-disabled" : "")}>

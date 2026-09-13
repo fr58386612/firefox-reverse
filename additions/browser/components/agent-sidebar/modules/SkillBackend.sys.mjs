@@ -452,6 +452,136 @@ export class SkillRegistry {
     }
   }
 
+  /**
+   * 二开修复：从本地导入技能——SkillsPane「导入」按钮的后端。
+   * @param {string} params.path  .md 文件绝对路径，或包含 SKILL.md 的目录（技能包）
+   * @param {boolean} params.overwrite 同名已存在时是否覆盖
+   * 名称优先级：frontmatter.name → 文件名/目录名（小写、空格转连字符、去非法字符）。
+   * 目录导入会把 SKILL.md 以外的同级文件/子目录（references/assets 等）一并复制，
+   * skill_read_resource 对导入技能继续可用。
+   */
+  async importSkill(params = {}, ctx = {}) {
+    try {
+      if (typeof IOUtils === "undefined" || typeof PathUtils === "undefined") {
+        return { ok: false, error: "导入 Skill 需要浏览器环境（IOUtils 不可用）" };
+      }
+      const raw = String(params.path || "").trim().replace(/^file:\/\/\/?/i, "/").replace(/\\/g, "/");
+      if (!raw) return { ok: false, error: "path 不能为空" };
+      let st;
+      try {
+        st = await IOUtils.stat(raw);
+      } catch {
+        return { ok: false, error: `路径不存在：${raw}` };
+      }
+      let srcPath = raw;
+      let fallbackName;
+      let srcDir = null;
+      if (st.type === "directory") {
+        srcDir = raw.replace(/\/+$/, "");
+        const skillMd = PathUtils.join(srcDir, "SKILL.md");
+        try {
+          await IOUtils.stat(skillMd);
+          srcPath = skillMd;
+        } catch {
+          const entries = await IOUtils.readDirectory(srcDir);
+          // 选到技能包的父目录：恰好只有一个子目录含 SKILL.md → 下钻进那个子目录
+          const withSkill = [];
+          for (const e of entries) {
+            if (e.type !== "directory" || e.name.startsWith(".")) continue;
+            try { await IOUtils.stat(PathUtils.join(srcDir, e.name, "SKILL.md")); withSkill.push(e.name); } catch { /* 不是技能目录 */ }
+          }
+          if (withSkill.length === 1) {
+            srcDir = PathUtils.join(srcDir, withSkill[0]);
+            srcPath = PathUtils.join(srcDir, "SKILL.md");
+          } else {
+            const mds = entries.filter(e => e.type === "regular" && /\.md$/i.test(e.name));
+            if (!mds.length) return { ok: false, error: "目录里没有 SKILL.md（也没找到唯一的含 SKILL.md 子目录或其它 .md 文件）" };
+            srcPath = PathUtils.join(srcDir, mds[0].name);
+            fallbackName = mds[0].name.replace(/\.md$/i, "");
+          }
+        }
+        if (!fallbackName) fallbackName = PathUtils.baseName(srcDir);
+      } else {
+        fallbackName = PathUtils.baseName(raw).replace(/\.(md|markdown|txt)$/i, "");
+      }
+      let text;
+      try {
+        text = (await IOUtils.readUTF8(srcPath)).replace(/^\uFEFF/, "");
+      } catch (e) {
+        return { ok: false, error: `读取失败：${(e && e.message) || e}` };
+      }
+      if (!text.trim()) return { ok: false, error: "文件内容为空" };
+      if (text.length > MAX_SKILL_CHARS) {
+        return { ok: false, error: `正文超过 ${Math.floor(MAX_SKILL_CHARS / 1024)}KB` };
+      }
+      const fm = parseSkillFrontmatter(text);
+      let name = String(fm.name || "").trim().toLowerCase().replace(/\s+/g, "-");
+      if (!validSkillName(name)) {
+        name = String(fallbackName || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[\s_]+/g, "-")
+          .replace(/[^a-z0-9-]/g, "")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 64);
+      }
+      if (!validSkillName(name)) {
+        return { ok: false, error: "无法得出合法技能名（需小写字母/数字/连字符）；请在 SKILL.md frontmatter 里写 name: 后重试" };
+      }
+      const description = fm.description || `导入技能：${name}`;
+      const home = this._homeDir();
+      if (!home) return { ok: false, error: "无法定位用户主目录" };
+      const dir = PathUtils.join(home, ".firefox-reverse", "skills", name);
+      const skillPath = PathUtils.join(dir, "SKILL.md");
+      let exists = false;
+      try { exists = (await IOUtils.stat(skillPath)).type === "regular"; } catch { /* fresh */ }
+      if (exists && !params.overwrite) {
+        return { ok: false, error: `Skill "${name}" 已存在；确认覆盖请再点一次导入`, needOverwrite: true, name };
+      }
+      await IOUtils.makeDirectory(dir, { ignoreExisting: true, createAncestors: true });
+      // 目录导入：先整包复制同级资源（references/assets/scripts…），SKILL.md 随后写覆盖版正文。
+      let copiedResources = 0;
+      if (srcDir && srcDir !== dir) {
+        try {
+          const entries = await IOUtils.readDirectory(srcDir);
+          for (const e of entries) {
+            if (e.type !== "directory") continue;
+            if (e.name === "SKILL.md" || e.name.startsWith(".")) continue;
+            const dest = PathUtils.join(dir, e.name);
+            try { await IOUtils.remove(dest, { recursive: true }); } catch { /* fresh */ }
+            await IOUtils.copyTree(PathUtils.join(srcDir, e.name), dest);
+            copiedResources++;
+          }
+        } catch { /* 资源复制是增强项，失败不阻断导入 */ }
+      }
+      // 无 frontmatter 的裸 md 自动补一份；frontmatter 的 name 若非法（大写/中文等，
+      // 目录扫描会整条跳过该技能）只改写 name 行，其余字段（license 等）原样保留。
+      let outText = text;
+      if (!/^---\r?\n/.test(text)) {
+        outText = `---\nname: ${name}\ndescription: ${description}\n---\n\n${text.trim()}\n`;
+      } else if (!validSkillName(String(fm.name || "").trim())) {
+        const m = outText.match(/^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n?)/);
+        if (m) {
+          const hasName = /^name:[ \t]*.*$/m.test(m[2]);
+          const block = hasName ? m[2].replace(/^name:[ \t]*.*$/m, `name: ${name}`) : `name: ${name}\n${m[2]}`;
+          outText = m[1] + block + m[3];
+        }
+      }
+      await IOUtils.writeUTF8(skillPath, outText);
+      return {
+        ok: true,
+        name,
+        description,
+        path: skillPath,
+        chars: outText.length,
+        copiedResources,
+        note: exists ? `已覆盖旧版 "${name}"` : `已导入 "${name}"；skill_list 可见，任务匹配时自动注入`,
+      };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
   /** SkillsPane 编辑保存：整文覆盖写回原 SKILL.md（内置不可编辑；工作区 skill 允许改）。 */
   async updateSkill(params = {}, ctx = {}) {
     try {

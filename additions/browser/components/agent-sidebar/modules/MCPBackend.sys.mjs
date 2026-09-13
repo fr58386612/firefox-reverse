@@ -206,37 +206,67 @@ function isWindowsPlatform() {
   return _isWin;
 }
 
+// Subprocess.call 不搜 PATH：command 必须是绝对路径（裸名一律 "does not exist"），
+// 而且 Windows 的 pathSearch 会先命中 npm 无扩展名的 bash shim。这里优先按
+// PATHEXT 找 .cmd/.exe 版本，最后才接受无扩展名文件。
+async function resolveCommand(Subprocess, command, env) {
+  if (isWindowsPlatform() && !PathUtils.isAbsolute(command) && !/\.[a-z0-9]+$/i.test(command)) {
+    const exts = String(env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+    let firstErr = null;
+    for (const ext of exts) {
+      try {
+        return await Subprocess.pathSearch(command + ext, env);
+      } catch (e) {
+        if (!firstErr) firstErr = e;
+      }
+    }
+    try {
+      return await Subprocess.pathSearch(command, env);
+    } catch (e) {
+      throw firstErr || e;
+    }
+  }
+  return Subprocess.pathSearch(command, env);
+}
+
 async function connectStdio(server) {
   const SP = lazyESM("resource://gre/modules/Subprocess.sys.mjs");
   const Subprocess = SP && SP.Subprocess;
   if (!Subprocess) throw new Error("Subprocess 不可用：MCP stdio 需在本浏览器内运行");
   const enc = new TextEncoder();
   const envObj = server.env && typeof server.env === "object" ? server.env : {};
+  // 解析用的环境 = 浏览器进程环境 + server 自带 env（env 里自定义 PATH 也生效）。
+  let resolveEnv = {};
+  try { resolveEnv = Subprocess.getEnvironment(); } catch { /* 极端环境拿不到就走 env 里的 PATH */ }
+  Object.assign(resolveEnv, envObj);
+  let spawnCommand;
+  try {
+    spawnCommand = await resolveCommand(Subprocess, server.command, resolveEnv);
+  } catch (e) {
+    throw new Error(`找不到可执行程序 ${server.command}：${(e && e.message) || e}（检查命令是否已安装、PATH 是否包含其目录）`);
+  }
+  let spawnArgs = server.args || [];
+  // Windows：npx/npm/uvx 等 .cmd/.bat shim，CreateProcess 不能直接执行 → cmd.exe /c 包装。
+  // cmd.exe 同样要解析成绝对路径（Subprocess 不搜 PATH）。
+  if (isWindowsPlatform() && /\.cmd$|\.bat$/i.test(spawnCommand)) {
+    let cmdExe = null;
+    try { cmdExe = await Subprocess.pathSearch("cmd.exe", resolveEnv); } catch { /* 下面报错兜底 */ }
+    if (!cmdExe) {
+      const sysRoot = resolveEnv.SystemRoot || resolveEnv.windir || "C:\\Windows";
+      cmdExe = PathUtils.join(sysRoot, "System32", "cmd.exe");
+    }
+    spawnArgs = ["/d", "/s", "/c", spawnCommand, ...spawnArgs];
+    spawnCommand = cmdExe;
+  }
   const base = {
-    command: server.command,
-    arguments: server.args || [],
+    command: spawnCommand,
+    arguments: spawnArgs,
     ...(server.cwd ? { workdir: server.cwd } : {}),
     environment: envObj,
     environmentAppend: true, // 继承浏览器进程环境（PATH 等），env 只作覆盖/追加
     stderr: "pipe", // 单独管道静默吞掉：污染 stdout 的协议流才是大忌，stderr 留给调试
   };
-  let proc;
-  try {
-    proc = await Subprocess.call(base);
-  } catch (e) {
-    // Windows：npx/npm/uvx 等是 .cmd shim，CreateProcess 直接起不来 → cmd.exe /c 兜底。
-    if (!isWindowsPlatform()) throw e;
-    try {
-      proc = await Subprocess.call({
-        ...base,
-        command: "cmd.exe",
-        arguments: ["/d", "/s", "/c", server.command, ...(server.args || [])],
-      });
-    } catch (e2) {
-      const detail = String((e2 && e2.message) || e2);
-      throw new Error(`${(e && e.message) || e}（cmd.exe 兜底也失败：${detail}）`);
-    }
-  }
+  const proc = await Subprocess.call(base);
   const rpc = new MCPJsonRpc({
     name: server.name,
     send: obj => proc.stdin.write(enc.encode(JSON.stringify(obj) + "\n")),

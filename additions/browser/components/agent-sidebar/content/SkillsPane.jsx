@@ -100,8 +100,9 @@ export default function SkillsPane({ skill, store, workspace, onClose }) {
     }
   }
 
-  // 二开修复：导入技能——nsIFilePicker 选 .md 文件或技能目录（chrome 特权文档可直接用）。
-  function pickPath(mode, title) {
+  // 二开修复：导入技能——用 nsIFilePicker 选 .md 文件或技能目录（chrome 特权文档可直接用）。
+  // 注意：本 153 分支已移除同步 show()，只能用异步 open(callback)，与 AgentPanel.pickDirectory 同款。
+  async function pickPath(mode, title) {
     try {
       const Cc = typeof Components !== "undefined" ? Components.classes : null;
       const Ci = typeof Components !== "undefined" ? Components.interfaces : null;
@@ -117,7 +118,7 @@ export default function SkillsPane({ skill, store, workspace, onClose }) {
         mode === "dir" ? Ci.nsIFilePicker.modeGetFolder : Ci.nsIFilePicker.modeGetFile
       );
       if (mode !== "dir") fp.appendFilter("技能文件 (*.md)", "*.md;*.markdown;*.txt");
-      const res = fp.show();
+      const res = await new Promise(resolve => fp.open(resolve));
       return res === Ci.nsIFilePicker.returnOK ? fp.file.path : null;
     } catch (e) {
       setError("打开文件选择器失败：" + ((e && e.message) || e));
@@ -128,7 +129,7 @@ export default function SkillsPane({ skill, store, workspace, onClose }) {
   async function addImport(mode) {
     setError("");
     setMsg("");
-    const path = pickPath(mode, mode === "dir" ? "选择技能目录（内含 SKILL.md）" : "选择技能文件（.md）");
+    const path = await pickPath(mode, mode === "dir" ? "选择技能目录（内含 SKILL.md）" : "选择技能文件（.md）");
     if (!path) return;
     try {
       let r = await skill.importSkill({ path }, { workspaceRoot: wsRoot || null });

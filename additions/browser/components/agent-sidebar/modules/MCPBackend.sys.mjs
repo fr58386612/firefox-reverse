@@ -192,6 +192,20 @@ function lazyESM(url) {
   }
 }
 
+// AppConstants 在 system ESM 里不是全局（不 import 就是 ReferenceError）——懒加载一次，
+// Node 自测等无浏览器环境退回 navigator.platform。
+let _isWin;
+function isWindowsPlatform() {
+  if (_isWin === undefined) {
+    const AC = lazyESM("resource://gre/modules/AppConstants.sys.mjs");
+    if (AC && AC.AppConstants) _isWin = AC.AppConstants.platform === "win";
+    else {
+      try { _isWin = /win/i.test(navigator.platform || ""); } catch { _isWin = false; }
+    }
+  }
+  return _isWin;
+}
+
 async function connectStdio(server) {
   const SP = lazyESM("resource://gre/modules/Subprocess.sys.mjs");
   const Subprocess = SP && SP.Subprocess;
@@ -211,14 +225,17 @@ async function connectStdio(server) {
     proc = await Subprocess.call(base);
   } catch (e) {
     // Windows：npx/npm/uvx 等是 .cmd shim，CreateProcess 直接起不来 → cmd.exe /c 兜底。
-    let isWin = false;
-    try { isWin = AppConstants.platform === "win"; } catch { /* keep false */ }
-    if (!isWin) throw e;
-    proc = await Subprocess.call({
-      ...base,
-      command: "cmd.exe",
-      arguments: ["/d", "/s", "/c", server.command, ...(server.args || [])],
-    });
+    if (!isWindowsPlatform()) throw e;
+    try {
+      proc = await Subprocess.call({
+        ...base,
+        command: "cmd.exe",
+        arguments: ["/d", "/s", "/c", server.command, ...(server.args || [])],
+      });
+    } catch (e2) {
+      const detail = String((e2 && e2.message) || e2);
+      throw new Error(`${(e && e.message) || e}（cmd.exe 兜底也失败：${detail}）`);
+    }
   }
   const rpc = new MCPJsonRpc({
     name: server.name,

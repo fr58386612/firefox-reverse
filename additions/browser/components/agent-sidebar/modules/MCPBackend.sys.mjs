@@ -14,6 +14,23 @@
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05"; // 最广泛兼容的协商版本；server 不支持时按其返回版本走。
 
+/* setTimeout/clearTimeout 解析（同 LlmClient 约定）：Firefox system ESM 的 globalThis 没有
+ * window 定时器，裸用 setTimeout 会 ReferenceError（真机症状「setTimeout is not defined」）——
+ * 从 Timer.sys.mjs 取；Node 自测走 globalThis 分支。 */
+const { setTimeout: _setTimeout, clearTimeout: _clearTimeout } = (() => {
+  if (typeof globalThis.setTimeout === "function") {
+    return {
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: (globalThis.clearTimeout || (() => {})).bind(globalThis),
+    };
+  }
+  if (typeof ChromeUtils !== "undefined") {
+    const T = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+    return { setTimeout: T.setTimeout, clearTimeout: T.clearTimeout };
+  }
+  return { setTimeout: () => 0, clearTimeout: () => {} }; // 兜底：无定时器 → 不超时
+})();
+
 /* ───────────────────────── JSON-RPC 层 ───────────────────────── */
 
 export class MCPJsonRpc {
@@ -56,7 +73,7 @@ export class MCPJsonRpc {
       const p = this._pending.get(msg.id);
       if (!p) return;
       this._pending.delete(msg.id);
-      clearTimeout(p.timer);
+      _clearTimeout(p.timer);
       if (msg.error) p.reject(new Error(`${this._name}: ${msg.error.message || JSON.stringify(msg.error)}`));
       else p.resolve(msg.result);
       return;
@@ -84,7 +101,7 @@ export class MCPJsonRpc {
     if (this.closed) return Promise.reject(new Error(`${this._name}: transport closed`));
     const id = this._nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = _setTimeout(() => {
         this._pending.delete(id);
         reject(new Error(`${this._name}: ${method} 超时(${timeoutMs}ms)`));
       }, Math.max(1000, timeoutMs));
@@ -92,7 +109,7 @@ export class MCPJsonRpc {
       Promise.resolve(this._send({ jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) }))
         .catch(e => {
           this._pending.delete(id);
-          clearTimeout(timer);
+          _clearTimeout(timer);
           reject(e);
         });
     });
@@ -109,7 +126,7 @@ export class MCPJsonRpc {
     this.closed = true;
     const e = new Error(`${this._name}: ${reason || "连接已关闭"}`);
     for (const p of this._pending.values()) {
-      clearTimeout(p.timer);
+      _clearTimeout(p.timer);
       p.reject(e);
     }
     this._pending.clear();

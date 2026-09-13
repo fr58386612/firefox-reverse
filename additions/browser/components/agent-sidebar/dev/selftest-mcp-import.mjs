@@ -57,26 +57,29 @@ const cs = new ConfigStore();
   ok(r.servers[0].id === "mcp_abc" && r.servers[0].enabled === false, "id/enabled 透传");
 }
 
-/* ── ② importSkill（内存 FS 桩） ── */
+/* ── ② importSkill（内存 FS 桩） ──
+ * 桩对齐 FF153 新 IOUtils/PathUtils WebIDL：只有 stat(path)（无 followSymlinks）、
+ * getChildren(全路径)、copy({recursive})、readDirectory/copyTree/realPath/baseName 均已删除。
+ * junctions 集合模拟 Windows 装入点：stat 直接抛「不存在」，但枚举/读取照常（用户事故现场）。 */
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "frx-import-"));
 const home = path.join(tmp, "home");
 const src = path.join(tmp, "src");
 await fs.mkdir(home, { recursive: true });
 await fs.mkdir(src, { recursive: true });
-globalThis.PathUtils = { homeDir: home, join: (...p) => path.join(...p), filename: p => path.basename(p), baseName: p => path.basename(p) };
+globalThis.PathUtils = { join: (...p) => path.join(...p), filename: p => path.basename(p) };
 globalThis.Services = { env: { get: () => home } };
+const junctions = new Set();
 globalThis.IOUtils = {
   async getChildren(p) { return (await fs.readdir(p)).map(n => path.join(p, n)); },
-  async stat(p) { const s = await fs.stat(p); return { type: s.isDirectory() ? "directory" : "regular", size: s.size }; },
+  async stat(p) {
+    if (junctions.has(path.resolve(p))) { const e = new Error("Could not stat: file does not exist"); e.code = "ENOENT"; throw e; }
+    const s = await fs.stat(p); return { type: s.isDirectory() ? "directory" : "regular", size: s.size };
+  },
   readUTF8: p => fs.readFile(p, "utf8"),
   writeUTF8: (p, t) => fs.writeFile(p, t, "utf8"),
   async makeDirectory(p) { await fs.mkdir(p, { recursive: true }); },
   async remove(p) { await fs.rm(p, { recursive: true, force: true }); },
-  async readDirectory(p) {
-    return (await fs.readdir(p, { withFileTypes: true })).map(e => ({ name: e.name, type: e.isDirectory() ? "directory" : "regular" }));
-  },
-  async copyTree(from, to) { await fs.cp(from, to, { recursive: true }); },
-  realPath: p => fs.realpath(p),
+  async copy(from, to, opts = {}) { await fs.cp(from, to, { recursive: !!opts.recursive }); },
 };
 const reg = new SkillRegistry({});
 
@@ -126,6 +129,32 @@ const reg = new SkillRegistry({});
   await fs.mkdir(emptyDir, { recursive: true });
   const r2 = await reg.importSkill({ path: emptyDir });
   ok(!r2.ok && /没有 SKILL.md/.test(r2.error), "目录无 md → 明确报错");
+}
+
+{
+  const r = cs.parseMcpInput('{"dbx":{"type":"stdio","command":"dbx-mcp-server","args":[]}}');
+  ok(!r.errors.length && r.servers.length === 1 && r.servers[0].name === "dbx" && r.servers[0].transport === "stdio" && r.servers[0].command === "dbx-mcp-server",
+    "Claude Desktop 裸映射 {\"dbx\":{type,command}} → 键即名字");
+  const r2 = cs.parseMcpInput('{"multi":{"command":"a"},"other":{"type":"http","url":"https://x.y/mcp"}}');
+  ok(!r2.errors.length && r2.servers.length === 2 && r2.servers[1].transport === "http", "裸映射多 server");
+  const r3 = cs.parseMcpInput('{"name":"solo","command":"node"}');
+  ok(!r3.errors.length && r3.servers.length === 1 && r3.servers[0].name === "solo", "单 server 对象不被误判为映射");
+}
+{
+  // Windows junction（装入点）：目录本身 stat 抛「不存在」，但可枚举、SKILL.md 可读——
+  // 用户现场 C:/Users/pc/.zcode/skills/pdf 就是 junction，旧实现卡死在这一步。
+  const jdir = path.join(src, "pdf");
+  await fs.mkdir(jdir, { recursive: true });
+  await fs.mkdir(path.join(jdir, "scripts"), { recursive: true });
+  await fs.writeFile(path.join(jdir, "SKILL.md"), "---\nname: pdf\ndescription: PDF 处理\n---\n正文\n", "utf8");
+  await fs.writeFile(path.join(jdir, "scripts", "run.js"), "// res", "utf8");
+  junctions.add(path.resolve(jdir));
+  const r = await reg.importSkill({ path: jdir });
+  ok(r.ok && r.name === "pdf", `junction 目录可导入（${r.error || r.name}）`);
+  const listed = await reg.list({});
+  ok(listed.skills.some(s => s.name === "pdf"), "junction 导入的技能可被 skill_list 发现");
+  const res = await reg.readResource({ name: "pdf", path: "scripts/run.js" });
+  ok(res.ok && res.content === "// res", "junction 内资源目录已随包复制");
 }
 
 console.log(`\nselftest-mcp-import: ${pass} PASS / ${fail} FAIL`);

@@ -504,7 +504,20 @@ export class ConfigStore {
           ...(v && typeof v === "object" ? v : {}),
         }));
       } else {
-        list = [data];
+        // Claude Desktop 裸映射：{"dbx": {"type":"stdio","command":…}}——顶层键全是
+        // server 名（无任何单 server 字段、且值都是对象）时按 名字→配置 展开。
+        const SERVER_KEYS = ["name", "serverName", "command", "cmd", "bin", "executable",
+          "url", "serverUrl", "server_url", "endpoint", "uri", "transport", "type",
+          "args", "arguments", "env", "environment", "headers", "cwd", "workingDirectory", "enabled"];
+        const keys = Object.keys(data);
+        const looksLikeMap = keys.length > 0
+          && !keys.some(k => SERVER_KEYS.includes(k))
+          && keys.every(k => data[k] && typeof data[k] === "object" && !Array.isArray(data[k]));
+        if (looksLikeMap) {
+          list = Object.entries(data).map(([name, v]) => ({ name, ...v }));
+        } else {
+          list = [data];
+        }
       }
     } else {
       return { servers: [], errors: ["配置需为数组、{\"mcpServers\":{…}} 映射或单个 server 对象"] };

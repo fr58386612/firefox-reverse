@@ -174,6 +174,40 @@ export class SkillRegistry {
     return IOUtils.readUTF8(path);
   }
 
+  // FF153：IOUtils/PathUtils 已改为 WebIDL C++ 实现——没有 readDirectory/copyTree/baseName/realPath，
+  // 且对 Windows junction（装入点）直接 stat 可能抛「不存在」。目录探测统一走双通道：
+  // stat 不成就试 getChildren（junction 不可 stat 但可枚举）；SKILL.md 等路径下的文件可正常 stat。
+  async _listDir(dir) {
+    const kids = await IOUtils.getChildren(dir);
+    const out = [];
+    for (const p of kids) {
+      let type = "other";
+      try {
+        type = (await IOUtils.stat(p)).type;
+      } catch {
+        /* stat 不动（如子 junction）按 other 处理 */
+      }
+      out.push({ name: PathUtils.filename(p), path: p, type });
+    }
+    return out;
+  }
+
+  // 返回 {kind:"file"} | {kind:"dir",entries} | {kind:null,statErr}
+  async _probePath(p) {
+    let statErr = null;
+    try {
+      const st = await IOUtils.stat(p);
+      if (st.type === "regular") return { kind: "file" };
+    } catch (e) {
+      statErr = e;
+    }
+    try {
+      return { kind: "dir", entries: await this._listDir(p) };
+    } catch {
+      return { kind: null, statErr };
+    }
+  }
+
   async _scanRoot(entry) {
     let children;
     try {
@@ -188,8 +222,12 @@ export class SkillRegistry {
     }
     for (const dir of children.slice(0, 200)) {
       try {
-        const stat = await IOUtils.stat(dir);
-        if (stat.type !== "directory") continue;
+        let statType = "unknown";
+        try {
+          statType = (await IOUtils.stat(dir)).type;
+        } catch { /* junction 装入点 stat 可能抛错：继续按目录试（读 SKILL.md 会裁决） */ }
+        // 只有明确是普通文件才排除；junction 的 type 可能是 "other"/抛错，不能据此拒绝
+        if (statType === "regular") continue;
         if (realRoot) {
           const realDir = await IOUtils.realPath(dir);
           if (!pathInside(realRoot, realDir)) continue;
@@ -465,44 +503,49 @@ export class SkillRegistry {
       if (typeof IOUtils === "undefined" || typeof PathUtils === "undefined") {
         return { ok: false, error: "导入 Skill 需要浏览器环境（IOUtils 不可用）" };
       }
-      const raw = String(params.path || "").trim().replace(/^file:\/\/\/?/i, "/").replace(/\\/g, "/");
+      const raw = String(params.path || "")
+        .trim()
+        .replace(/^file:\/\/([a-zA-Z]:)?/i, "$1")
+        .replace(/[\\/]+$/, "");
       if (!raw) return { ok: false, error: "path 不能为空" };
-      let st;
-      try {
-        st = await IOUtils.stat(raw);
-      } catch {
-        return { ok: false, error: `路径不存在：${raw}` };
+      const probed = await this._probePath(raw);
+      if (!probed.kind) {
+        const why = probed.statErr ? `（${(probed.statErr && probed.statErr.message) || probed.statErr}）` : "";
+        return { ok: false, error: `路径不可读：不存在或无权限：${raw}${why}` };
       }
       let srcPath = raw;
       let fallbackName;
       let srcDir = null;
-      if (st.type === "directory") {
-        srcDir = raw.replace(/\/+$/, "");
+      if (probed.kind === "dir") {
+        srcDir = raw;
         const skillMd = PathUtils.join(srcDir, "SKILL.md");
+        let direct = false;
         try {
           await IOUtils.stat(skillMd);
+          direct = true;
+        } catch { /* 顶层没有 SKILL.md，往下看子目录 */ }
+        if (direct) {
           srcPath = skillMd;
-        } catch {
-          const entries = await IOUtils.readDirectory(srcDir);
+        } else {
           // 选到技能包的父目录：恰好只有一个子目录含 SKILL.md → 下钻进那个子目录
           const withSkill = [];
-          for (const e of entries) {
-            if (e.type !== "directory" || e.name.startsWith(".")) continue;
-            try { await IOUtils.stat(PathUtils.join(srcDir, e.name, "SKILL.md")); withSkill.push(e.name); } catch { /* 不是技能目录 */ }
+          for (const e of probed.entries) {
+            if (e.type === "regular" || e.name.startsWith(".")) continue;
+            try { await IOUtils.stat(PathUtils.join(e.path, "SKILL.md")); withSkill.push(e.name); } catch { /* 不是技能目录 */ }
           }
           if (withSkill.length === 1) {
             srcDir = PathUtils.join(srcDir, withSkill[0]);
             srcPath = PathUtils.join(srcDir, "SKILL.md");
           } else {
-            const mds = entries.filter(e => e.type === "regular" && /\.md$/i.test(e.name));
+            const mds = probed.entries.filter(e => e.type === "regular" && /\.md$/i.test(e.name));
             if (!mds.length) return { ok: false, error: "目录里没有 SKILL.md（也没找到唯一的含 SKILL.md 子目录或其它 .md 文件）" };
-            srcPath = PathUtils.join(srcDir, mds[0].name);
+            srcPath = mds[0].path;
             fallbackName = mds[0].name.replace(/\.md$/i, "");
           }
         }
-        if (!fallbackName) fallbackName = PathUtils.baseName(srcDir);
+        if (!fallbackName) fallbackName = PathUtils.filename(srcDir);
       } else {
-        fallbackName = PathUtils.baseName(raw).replace(/\.(md|markdown|txt)$/i, "");
+        fallbackName = PathUtils.filename(raw).replace(/\.(md|markdown|txt)$/i, "");
       }
       let text;
       try {
@@ -543,14 +586,15 @@ export class SkillRegistry {
       let copiedResources = 0;
       if (srcDir && srcDir !== dir) {
         try {
-          const entries = await IOUtils.readDirectory(srcDir);
-          for (const e of entries) {
-            if (e.type !== "directory") continue;
+          for (const e of await this._listDir(srcDir)) {
             if (e.name === "SKILL.md" || e.name.startsWith(".")) continue;
             const dest = PathUtils.join(dir, e.name);
             try { await IOUtils.remove(dest, { recursive: true }); } catch { /* fresh */ }
-            await IOUtils.copyTree(PathUtils.join(srcDir, e.name), dest);
-            copiedResources++;
+            try {
+              // 目录（含 junction，stat 可能给 other/抛错）递归整树；普通文件直接复制
+              await IOUtils.copy(e.path, dest, e.type === "regular" ? {} : { recursive: true });
+              copiedResources++;
+            } catch { /* 单个资源复制不动就跳过，不阻断 */ }
           }
         } catch { /* 资源复制是增强项，失败不阻断导入 */ }
       }

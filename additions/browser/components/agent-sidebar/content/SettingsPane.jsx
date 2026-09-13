@@ -441,7 +441,8 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
           />
           <span className="settings-pane__hint">
             每项：stdio 用 {"{ name, command, args, env, cwd }"}；远程用 {"{ name, transport: \"http\", url, headers }"}。
-            兼容 Claude Desktop 的 {"mcpServers"} 映射、单个 server 对象、type/serverUrl/cmd 等常见别名与 config 嵌套写法直接粘贴。
+            兼容 Claude Desktop 各种粘贴格式：裸映射 {"{\"dbx\":{\"type\":\"stdio\",\"command\":…}}"}、
+            {"mcpServers"} 包裹映射、数组、单个 server 对象，以及 type/serverUrl/cmd 等常见别名与 config 嵌套写法。
             保存时逐条校验：缺 command/url 或 name 含非 ASCII 字符会明确指出第几条哪里不对，不会存成空壳。
           </span>
           <div className="settings-pane__actions">

@@ -1,0 +1,116 @@
+# Firefox-Reverse · GitHub 托管 macOS 构建（Apple Silicon DMG）
+#
+# 用途：没有 self-hosted 编译机时，用 GitHub 托管的 macos-15（arm64）runner 从零
+#   编译 macOS Apple Silicon 版 DMG 并挂到指定 Release。
+# 前提：仓库为 PUBLIC（托管 macOS runner 对公开仓库免费）。私有仓库请在 Settings →
+#   Actions → Runners 挂一台真实 Mac 作 self-hosted runner，走 release.yml 的 build-mac。
+#
+# 诚实预期：runner 是 4 核 M 系，从零全量编译约 2.5~4 小时；objdir 需要 20GB+，
+#   本工作流先腾盘。失败常见于 bootstrap/磁盘，重跑即可（无缓存，每次全量）。
+# Intel(x86_64) 版不在这里编：arm64 runner 交叉编 Intel Gecko 无现成配置，
+#   需要 Intel runner 或 Linux 交叉（参考 configs/mozconfig.macos-x64 + 自托管方案）。
+#
+# 触发：手动 workflow_dispatch，填 release_tag（该 tag 的 Release 必须已存在，
+#   通常先由 Windows 侧发布创建）。
+
+name: Build macOS (GitHub-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "要上传 DMG 的既有 Release tag（例如 v153.0a1-m6.2）"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # 与 release.yml 相同的锁定基线：勿随意跟随 mozilla/main。
+  FIREFOX_REV: cebc55aab4d2661d1f6c2d1526362947ec4016c1
+  MOZ_SOURCE_REPO: https://github.com/${{ github.repository }}
+  MOZ_SOURCE_CHANGESET: ${{ github.sha }}
+  MOZCONFIG: ${{ github.workspace }}/firefox-reverse/configs/mozconfig.macos-arm64
+  OBJDIR: ${{ github.workspace }}/upstream/obj-aarch64-apple-darwin
+
+jobs:
+  build-mac-arm64:
+    runs-on: macos-15
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: firefox-reverse }
+
+      - name: 腾出磁盘（删用不到的 SDK/Xcode 副本）
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /Applications/Xcode_*.app /Applications/Xcode.app || true
+          sudo rm -rf /Library/Developer/CoreSimulator || true
+          sudo rm -rf /Users/runner/Android "$HOME/Android" || true
+          sudo rm -rf /Users/runner/hostedtoolcache "$HOME/hostedtoolcache" || true
+          sudo rm -rf /usr/local/share/dotnet || true
+          sudo rm -rf /Users/runner/.npm || true
+          df -h /
+
+      - name: 取 Firefox 源码（锁死基线 commit，浅取单提交）
+        run: |
+          set -euxo pipefail
+          git init upstream
+          git -C upstream remote add origin https://github.com/mozilla-firefox/firefox.git
+          git -C upstream fetch --depth 1 origin "$FIREFOX_REV"
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = "$FIREFOX_REV"
+
+      - name: 构建侧栏前端 bundle（bundle 是产物、未入库，CI 现编）
+        working-directory: firefox-reverse/additions/browser/components/agent-sidebar
+        run: |
+          set -euxo pipefail
+          npm ci || npm install
+          npm run build
+          test -f content/agent-sidebar.bundle.js
+
+      - name: 应用补丁集 + additions + fingerprint 配置
+        run: |
+          set -euxo pipefail
+          UPSTREAM_DIR="$PWD/upstream" bash firefox-reverse/scripts/apply-patches.sh
+          node firefox-reverse/scripts/check-branding-assets.mjs "$PWD/upstream"
+          grep -Fq '"agent-sidebar"' upstream/browser/components/moz.build
+          grep -Fq "isWindowsPlatform" upstream/browser/components/agent-sidebar/modules/MCPBackend.sys.mjs
+
+      - name: mach bootstrap（装 rust 工具链等，仅本机级安装）
+        working-directory: upstream
+        run: ./mach --no-interactive bootstrap --application-choice browser
+
+      - name: mach build（全量，2.5~4 小时）
+        working-directory: upstream
+        run: |
+          set -euxo pipefail
+          export MOZ_BUILD_DATE="$(date -u +%Y%m%d%H%M%S)"
+          echo "MOZ_BUILD_DATE=$MOZ_BUILD_DATE" >> "$GITHUB_ENV"
+          ./mach build
+
+      - name: ad-hoc 签名 + mach package 出 DMG
+        working-directory: upstream
+        run: |
+          set -euxo pipefail
+          bash "$GITHUB_WORKSPACE/firefox-reverse/scripts/macos-adhoc-sign-apps.sh" "$GITHUB_WORKSPACE/upstream"
+          ./mach package
+          ls -la "$OBJDIR"/dist/*.dmg
+
+      - name: 校验 DMG 架构与签名并改名
+        id: dmg
+        run: |
+          set -euxo pipefail
+          src=$( { ls "$OBJDIR"/dist/firefox-*.mac.dmg "$OBJDIR"/dist/firefox-*.dmg; } 2>/dev/null | head -1 || true )
+          test -n "$src"
+          bash firefox-reverse/scripts/macos-verify-dmg.sh --arch arm64 "$src" || {
+            echo "::warning::verify-dmg 校验未通过，仍继续上传（请人工复核）"; }
+          out="$GITHUB_WORKSPACE/firefox-reverse-${{ inputs.release_tag }}-macos-aarch64.dmg"
+          cp "$src" "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 DMG 到 Release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.dmg.outputs.path }}" --clobber

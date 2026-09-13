@@ -1,0 +1,17 @@
+# 补丁文件必须保持 LF：git apply 按字节比对上下文，Windows 默认 autocrlf=true
+# 会把 *.patch 检出为 CRLF，导致补丁对 LF 目标文件「does not apply」。
+*.patch text eol=lf
+*.diff text eol=lf
+
+# 构建/打包相关脚本在 bash 下执行，强制 LF
+*.sh text eol=lf
+Makefile text eol=lf
+mozconfig.* text eol=lf
+
+# 二进制资源
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+*.dll binary
+*.exe binary

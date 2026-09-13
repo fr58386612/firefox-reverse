@@ -1,0 +1,24 @@
+# Native Windows x86_64 build (MSVC + MozillaBuild + clang from mach bootstrap).
+# 用法：复制为 upstream/mozconfig，或 MKF 时 ./mach build 自动读取。
+# 前置：1) VS 2022 Build Tools（C++ 工作负载 + Windows SDK）
+#       2) C:\mozilla-build（mach bootstrap 或官方安装器）
+#       3) ./mach --no-interactive bootstrap --application-choice browser
+
+# 原生 Windows 构建：target 由主机探测（x86_64-pc-windows-msvc），无需显式 --target。
+# 显式 x86_64-pc-mingw32 已不被 configure 支持（会无限重试）。
+ac_add_options --enable-application=browser
+ac_add_options --enable-bootstrap
+
+# 开发机默认：优化构建但关掉测试与无关组件，缩短首次编译时间。
+ac_add_options --enable-release
+ac_add_options --disable-tests
+ac_add_options --disable-debug
+ac_add_options --disable-crashreporter
+ac_add_options --disable-default-browser-agent
+ac_add_options --disable-backgroundtasks
+ac_add_options --disable-updater
+ac_add_options --disable-update-agent
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-win-x64
+mk_add_options MOZ_CRASHREPORTER=0
+mk_add_options MOZ_TELEMETRY_REPORTING=0

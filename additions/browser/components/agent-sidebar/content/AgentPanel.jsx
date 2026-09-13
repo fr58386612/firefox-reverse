@@ -230,9 +230,12 @@ function StepList({ steps, hideTools, live, onChoose, choicesDisabled = true }) 
   });
 }
 
-// 完成态 assistant 消息体：默认展开全过程；收起后**只保留最后一段（结论）**，思考/工具/中间正文一并收齐
+// 完成态 assistant 消息体：**默认折叠全过程、只留结论**，点按钮才展开思考/工具/中间正文。
+// processCollapsePref 记住用户最近一次选择（本次面板存活期内生效）：收起态是新会话的默认，
+// 用户手动展开过则后续消息跟随展开，不用一条条点。
+let processCollapsePref = true;
 function AssistantBody({ steps, content, onChoose, choicesActive }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(processCollapsePref);
   if (!steps || !steps.length) {
     return <div className="msg__content md-in">{renderMarkdown(content)}</div>;
   }
@@ -253,7 +256,11 @@ function AssistantBody({ steps, content, onChoose, choicesActive }) {
     <div className="msg__content">
       <StepList steps={shown} hideTools={false} onChoose={onChoose} choicesDisabled={!choicesActive} />
       {collapsible && (
-        <button type="button" className="msg__toolToggle" onClick={() => setCollapsed(v => !v)}>
+        <button
+          type="button"
+          className="msg__toolToggle"
+          onClick={() => setCollapsed(v => { processCollapsePref = !v; return !v; })}
+        >
           {collapsed ? `▸ 展开思考/工具过程（${toolCount} 步工具）` : "▾ 收起过程，只看结论"}
         </button>
       )}

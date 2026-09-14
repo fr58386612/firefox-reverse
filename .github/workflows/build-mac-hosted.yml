@@ -1,19 +1,20 @@
-# Firefox-Reverse · GitHub 托管 macOS 构建（Apple Silicon DMG）
+# Firefox-Reverse · GitHub 托管 macOS 构建（Intel x86_64 DMG）
 #
-# 用途：没有 self-hosted 编译机时，用 GitHub 托管的 macos-15（arm64）runner 从零
-#   编译 macOS Apple Silicon 版 DMG 并挂到指定 Release。
-# 前提：仓库为 PUBLIC（托管 macOS runner 对公开仓库免费）。私有仓库请在 Settings →
-#   Actions → Runners 挂一台真实 Mac 作 self-hosted runner，走 release.yml 的 build-mac。
+# 用途：没有 self-hosted 编译机时，用 GitHub 托管的 macos-15-intel（x64）runner 从零
+#   编译 macOS Intel 版 DMG 并挂到指定 Release。
+# 前提：仓库为 PUBLIC（托管 macOS runner 对公开仓库免费）。
+# runner 标签：macos-15-intel（= macos-15-large，Intel 硬件；2026-09 仍在可用镜像表，
+#   macos-14-large 已废弃）。若该标签排队超时（疑似被划入付费 larger runner），改用
+#   ubuntu-latest + configs/mozconfig.macos-x64 的 Linux 交叉编译路线（upstream 注释认可）。
 #
-# 诚实预期：runner 是 4 核 M 系，从零全量编译约 2.5~4 小时；objdir 需要 20GB+，
+# 诚实预期：runner 是 Intel x86_64，native 全量编译约 3~5 小时；objdir 需要 20GB+，
 #   本工作流先腾盘。失败常见于 bootstrap/磁盘，重跑即可（无缓存，每次全量）。
-# Intel(x86_64) 版不在这里编：arm64 runner 交叉编 Intel Gecko 无现成配置，
-#   需要 Intel runner 或 Linux 交叉（参考 configs/mozconfig.macos-x64 + 自托管方案）。
+# Apple Silicon(arm64) 版如需要：复制本文件把 target 换 arm64、runs-on 换 macos-15 即可。
 #
 # 触发：手动 workflow_dispatch，填 release_tag（该 tag 的 Release 必须已存在，
 #   通常先由 Windows 侧发布创建）。
 
-name: Build macOS (GitHub-hosted)
+name: Build macOS Intel (GitHub-hosted)
 
 on:
   workflow_dispatch:
@@ -31,12 +32,12 @@ env:
   FIREFOX_REV: cebc55aab4d2661d1f6c2d1526362947ec4016c1
   MOZ_SOURCE_REPO: https://github.com/${{ github.repository }}
   MOZ_SOURCE_CHANGESET: ${{ github.sha }}
-  MOZCONFIG: ${{ github.workspace }}/firefox-reverse/configs/mozconfig.macos-arm64
-  OBJDIR: ${{ github.workspace }}/upstream/obj-aarch64-apple-darwin
+  MOZCONFIG: ${{ github.workspace }}/firefox-reverse/configs/mozconfig.macos-x64
+  OBJDIR: ${{ github.workspace }}/upstream/obj-x86_64-apple-darwin
 
 jobs:
-  build-mac-arm64:
-    runs-on: macos-15
+  build-mac-x64:
+    runs-on: macos-15-intel
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -77,13 +78,13 @@ jobs:
           UPSTREAM_DIR="$PWD/upstream" bash firefox-reverse/scripts/apply-patches.sh
           node firefox-reverse/scripts/check-branding-assets.mjs "$PWD/upstream"
           grep -Fq '"agent-sidebar"' upstream/browser/components/moz.build
-          grep -Fq "isWindowsPlatform" upstream/browser/components/agent-sidebar/modules/MCPBackend.sys.mjs
+          grep -Fq "normalizePathEnv" upstream/browser/components/agent-sidebar/modules/MCPBackend.sys.mjs
 
       - name: mach bootstrap（装 rust 工具链等，仅本机级安装）
         working-directory: upstream
         run: ./mach --no-interactive bootstrap --application-choice browser
 
-      - name: mach build（全量，2.5~4 小时）
+      - name: mach build（全量，3~5 小时）
         working-directory: upstream
         run: |
           set -euxo pipefail
@@ -105,12 +106,13 @@ jobs:
           set -euxo pipefail
           src=$( { ls "$OBJDIR"/dist/firefox-*.mac.dmg "$OBJDIR"/dist/firefox-*.dmg; } 2>/dev/null | head -1 || true )
           test -n "$src"
-          bash firefox-reverse/scripts/macos-verify-dmg.sh --arch arm64 "$src" || {
+          bash firefox-reverse/scripts/macos-verify-dmg.sh --arch x86_64 "$src" || {
             echo "::warning::verify-dmg 校验未通过，仍继续上传（请人工复核）"; }
-          out="$GITHUB_WORKSPACE/firefox-reverse-${{ inputs.release_tag }}-macos-aarch64.dmg"
+          out="$GITHUB_WORKSPACE/firefox-reverse-${{ inputs.release_tag }}-macos-x86_64.dmg"
           cp "$src" "$out"
           echo "path=$out" >> "$GITHUB_OUTPUT"
 
       - name: 上传 DMG 到 Release
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.dmg.outputs.path }}" --clobber
+        # 必须显式 -R：工作目录是 runner 工作区根（非 git 仓库），gh 会推断失败——arm64 首跑即挂在这。
+        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.dmg.outputs.path }}" --clobber -R "$GITHUB_REPOSITORY"

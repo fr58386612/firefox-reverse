@@ -905,6 +905,53 @@ function toolTable() {
       (b, a, ctx) => b.ledger.recall(a, ctx)
     ),
     T(
+      "memory_save",
+      "把一条**跨任务/跨站点全局有效**的信息写进 profile 级全局记忆（持久磁盘，**每个新会话每轮自动注入**你上下文，所有任务共享）。" +
+        "该记的就记、别等用户点名：用户表达的**长期偏好**（回复语言/格式/工作方式）、**协作规则**（以后都要/不要某行为）、" +
+        "**项目长期约定**（目录习惯/常用工具/端点惯例）、反复用到的**可复用教训**。同名=更新旧条目。" +
+        "**边界**：某站点的逆向突破点/坑→notes_add；当前任务的事实/死路→remember(任务账本)；方法论→skill。" +
+        "⚠ 别记一次性任务状态、密钥明文、未验证的猜测。",
+      {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "短标题（唯一键，同名=更新），如「回复语言偏好」「逆向开工流程」，≤80字" },
+          body: { type: "string", description: "要长期记住的内容，一到三句写具体（什么场景→怎么做），≤1000字" },
+          kind: { type: "string", enum: ["user", "feedback", "project", "reference", "note"], description: "user=用户画像/偏好；feedback=协作规则(以后都要/别)；project=项目/工作长期约定；reference=外部资源指路；note=其他。默认 note" },
+          description: { type: "string", description: "可选：一句话摘要（管理页展示用）" },
+        },
+        required: ["name", "body"],
+      },
+      b => b.memory && b.memory.save,
+      (b, a, ctx) => b.memory.save(a, ctx)
+    ),
+    T(
+      "memory_list",
+      "读全局记忆库（memory_save 沉淀、跨任务跨站点；每轮已自动注入摘要）。用 query 子串在名称/内容里精确查、或 kind 按类别过滤、翻全量按时间倒序。",
+      {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "关键词子串（匹配标题/摘要/正文）" },
+          kind: { type: "string", enum: ["user", "feedback", "project", "reference", "note"], description: "只返回该类别" },
+          limit: { type: "integer", description: "最多几条，默认 100（按更新时间倒序）" },
+        },
+      },
+      b => b.memory && b.memory.list,
+      (b, a, ctx) => b.memory.list(a, ctx)
+    ),
+    T(
+      "memory_delete",
+      "删除一条全局记忆（按短标题，大小写不敏感）。用户说「忘掉/别记了」，或发现某条记忆已过时/错了/被新条目取代时清理。",
+      {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "要删除的记忆短标题（memory_save 时用的 name）" },
+        },
+        required: ["name"],
+      },
+      b => b.memory && b.memory.remove,
+      (b, a, ctx) => b.memory.remove(a, ctx)
+    ),
+    T(
       "run_python",
       "在工作目录内执行 Python：传 code(内联, 经 python -c) 或 file(目录内 .py 路径)，可带 args；返回合并的 stdout/stderr 与退出码。",
       {

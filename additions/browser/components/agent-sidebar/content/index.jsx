@@ -58,6 +58,7 @@ function loadModules() {
     notes: backends.notes, // 逆向进展笔记后端（每轮把当前站点笔记摘要注入系统提示）
     skill: backends.skill, // 通用 SkillRegistry（内置 + 用户目录 + 工作区目录，正文按需读取）
     mcp: backends.mcp, // 二开 M5：MCP 客户端后端（设置页编辑 server + 测试连接）
+    memory: backends.memory, // 二开 M7：全局记忆后端（每轮注入 + /memory + 设置页管理）
     env: backends.env, // 环境管理后端（手动环境管理页 + MCP 共用同一套 env_* 能力）
     toolNames: router.names(),
   };
@@ -82,6 +83,7 @@ function App({ mods }) {
         notes={mods.notes}
         skill={mods.skill}
         mcp={mods.mcp}
+        memory={mods.memory}
         contextBudgetFor={mods.contextBudgetFor}
         toolNames={mods.toolNames}
         onOpenEnvironment={() => setView("environment")}
@@ -109,6 +111,7 @@ function App({ mods }) {
           providers={mods.providers}
           fetchModels={mods.fetchModels}
           mcp={mods.mcp}
+          memory={mods.memory}
           onClose={() => setView("chat")}
         />
       )}

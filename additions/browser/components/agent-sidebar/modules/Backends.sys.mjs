@@ -18,6 +18,7 @@ import { WebApiBackend } from "./WebApiBackend.sys.mjs";
 import { WorkspaceBackend } from "./WorkspaceBackend.sys.mjs";
 import { NotesBackend } from "./NotesBackend.sys.mjs";
 import { LedgerBackend } from "./LedgerBackend.sys.mjs";
+import { GlobalMemoryBackend } from "./GlobalMemory.sys.mjs";
 import { SkillBackend } from "./SkillBackend.sys.mjs";
 import { MCPBackend } from "./MCPBackend.sys.mjs";
 import { EnvironmentBackend } from "./EnvironmentBackend.sys.mjs";
@@ -50,6 +51,9 @@ export function getBackends() {
   // 任务级「沉淀式记忆」账本：已确认事实/已否决死路落 <工作目录>/.frx-ledger.ndjson + ledger.md，
   // 引擎每轮+压缩后整本注入上下文（治压缩后重新发现/重走死路）。remember 工具写、digest 注入、mergeHandoff 自动沉淀。
   const ledger = new LedgerBackend({ workspace });
+  // 二开 M7：profile 全局记忆——用户偏好/协作规则/项目约定/跨任务教训，跨任务跨站点持久，
+  // 引擎每轮随账本注入（AgentSession.getLedger 合并 summarizeForPrompt）。存储 <profile>/firefox-reverse-agent/global-memory.json。
+  const memory = new GlobalMemoryBackend();
   // 通用 SkillRegistry：内置逆向方法论 + 用户/工作区 SKILL.md；正文按需读取。
   // 二开 M5：SkillsPane/禁用集——isDisabled 每次现取（改配置即时生效），内置技能由 registry 内部豁免。
   const skill = new SkillBackend({
@@ -205,6 +209,6 @@ export function getBackends() {
     },
   };
 
-  _singleton = { page, net, scripts, code, jsvmp, webapi, workspace, notes, ledger, skill, mcp, env, addons, find, cookies };
+  _singleton = { page, net, scripts, code, jsvmp, webapi, workspace, notes, ledger, memory, skill, mcp, env, addons, find, cookies };
   return _singleton;
 }

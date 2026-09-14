@@ -1769,6 +1769,12 @@ body {
 .skills-pane__rootpath { font-family: monospace; font-size: 10px; opacity: .8; word-break: break-all; }
 .settings-pane__mcpjson { width: 100%; font-family: monospace; font-size: 11px; resize: vertical; box-sizing: border-box; }
 
+/* ── 二开 M7：设置页「全局记忆」条目行 ── */
+.settings-pane__memrow { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid rgba(128, 128, 128, .15); }
+.settings-pane__memrow-main { flex: 1; min-width: 0; }
+.settings-pane__memrow-name { font-size: 12px; font-weight: 600; }
+.settings-pane__memrow-body { font-size: 11px; opacity: .8; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* ── 二开 M6：输入框斜杠命令菜单 ── */
 .agent-panel__input { flex-wrap: wrap; }
 .agent-panel__slash {

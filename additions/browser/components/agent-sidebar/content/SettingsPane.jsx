@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 function legacyProfile(store, providers) {
   const provider = store.getActiveProvider();
@@ -16,7 +16,7 @@ function legacyProfile(store, providers) {
 }
 
 /** 模型配置管理：同一 provider 可保存多组账号/端点，选择历史配置即可切换。 */
-export default function SettingsPane({ store, providers, fetchModels, mcp, onClose }) {
+export default function SettingsPane({ store, providers, fetchModels, mcp, memory, onClose }) {
   const initialProfiles = store.listModelProfiles
     ? store.listModelProfiles()
     : [legacyProfile(store, providers)];
@@ -111,6 +111,30 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
   const providerRef = useRef(provider);
   providerRef.current = provider;
   const fetchSeqRef = useRef(0);
+
+  // 二开 M7：全局记忆管理——列出 Agent 跨任务沉淀的长期记忆，可查看/删除（写入由 memory_save 工具负责）。
+  const [memories, setMemories] = useState([]);
+  const [memMsg, setMemMsg] = useState("");
+  async function loadMemories() {
+    if (!memory || !memory.list) return;
+    try {
+      const r = await memory.list({ limit: 200 });
+      setMemories(r.memories || []);
+    } catch (e) {
+      setMemMsg("读取失败：" + ((e && e.message) || e));
+    }
+  }
+  useEffect(() => { void loadMemories(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  async function deleteMemory(name) {
+    setMemMsg("");
+    try {
+      const r = await memory.remove({ name });
+      setMemMsg(r.removed ? `已删除「${name}」` : `没有找到「${name}」`);
+      await loadMemories();
+    } catch (e) {
+      setMemMsg("删除失败：" + ((e && e.message) || e));
+    }
+  }
 
   function refreshProfiles(preferId) {
     if (!store.listModelProfiles) return;
@@ -450,6 +474,33 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, onClo
             <button type="button" onClick={testMcp} disabled={mcpBusy}>{mcpBusy ? "测试中…" : "测试连接"}</button>
             {mcpMsg && <span className="settings-pane__saved">{mcpMsg}</span>}
           </div>
+        </section>
+      )}
+
+      {memory && (
+        <section className="settings-pane__section">
+          <div className="settings-pane__section-title">全局记忆（跨任务长期沉淀 · {memories.length} 条）</div>
+          {memories.length === 0 ? (
+            <span className="settings-pane__hint">
+              还没有记忆。Agent 在工作中遇到值得长期记住的内容（用户偏好 / 协作规则 / 项目约定 / 可复用教训）会
+              memory_save 存进来，之后每个会话每轮自动注入；你也可以直接对 Agent 说「记住：…」。
+            </span>
+          ) : (
+            memories.map(m => (
+              <div key={m.id} className="settings-pane__memrow">
+                <div className="settings-pane__memrow-main">
+                  <div className="settings-pane__memrow-name">[{m.kind}] {m.name}</div>
+                  <div className="settings-pane__memrow-body">{m.body.length > 180 ? m.body.slice(0, 180) + "…" : m.body}</div>
+                </div>
+                <button type="button" onClick={() => deleteMemory(m.name)} title="删除这条记忆">删除</button>
+              </div>
+            ))
+          )}
+          <div className="settings-pane__actions">
+            <button type="button" onClick={() => void loadMemories()}>刷新</button>
+            {memMsg && <span className="settings-pane__saved">{memMsg}</span>}
+          </div>
+          <span className="settings-pane__hint">记忆存于本 profile（global-memory.json），所有任务/站点共享；过时的及时删。</span>
         </section>
       )}
 

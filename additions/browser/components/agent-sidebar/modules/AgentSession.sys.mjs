@@ -654,12 +654,17 @@ export const agentSession = {
         toolCtx: { workspaceRoot: workspaceRoot || null, win: win || null, signal: ac.signal },
         // 沉淀式记忆：每轮开头 + 每次压缩后，引擎取最新账本(已确认事实/已否决死路)整本注入系统提示，
         // 让确认过的事实不因压缩衰减、动手前先看账本（治"压缩后重新发现/重走死路"）。
+        // 二开 M7：同一注入位再并上 profile 全局记忆（跨任务的用户偏好/协作规则/项目约定，
+        // 自带字符预算）。两块各自可选——任一侧取失败只丢该块，不影响回合。
         getLedger: async () => {
+          const blocks = [];
           try {
-            return await getBackends().ledger.digest({}, { workspaceRoot: workspaceRoot || null });
-          } catch {
-            return "";
-          }
+            blocks.push(await getBackends().ledger.digest({}, { workspaceRoot: workspaceRoot || null }));
+          } catch { /* 账本可选 */ }
+          try {
+            blocks.push(await getBackends().memory.summarizeForPrompt());
+          } catch { /* 全局记忆可选 */ }
+          return blocks.filter(Boolean).join("\n\n");
         },
         contextStrategy: s.contextStrategy,
         cacheKey,

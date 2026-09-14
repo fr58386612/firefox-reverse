@@ -324,6 +324,7 @@ const SLASH_COMMANDS = [
   { cmd: "/context", desc: "查看上下文占用（上次请求 token / 预算 / 是否已折叠）" },
   { cmd: "/skills", desc: "列出可用技能（含启用/禁用状态）" },
   { cmd: "/mcp", desc: "查看 MCP 服务器连接状态与工具数" },
+  { cmd: "/memory", desc: "查看全局记忆（跨任务的偏好/约定/教训，设置页管理）" },
   { cmd: "/help", desc: "显示全部可用命令" },
 ];
 
@@ -332,7 +333,7 @@ const _CC = typeof Components !== "undefined" ? Components.classes : typeof Cc !
 const _CI = typeof Components !== "undefined" ? Components.interfaces : typeof Ci !== "undefined" ? Ci : null;
 const _SVC = typeof Services !== "undefined" ? Services : null;
 
-export default function AgentPanel({ buildClient, conversations, store, router, runAgentTurn, session, isVisionModel, workspace, notes, skill, mcp, contextBudgetFor, toolNames = [], onOpenEnvironment, onOpenSettings, onOpenSkills, hidden = false }) {
+export default function AgentPanel({ buildClient, conversations, store, router, runAgentTurn, session, isVisionModel, workspace, notes, skill, mcp, memory, contextBudgetFor, toolNames = [], onOpenEnvironment, onOpenSettings, onOpenSkills, hidden = false }) {
   const [messages, setMessages] = useState([]); // 仅 user/assistant
   const [threads, setThreads] = useState([]); // 摘要列表
   const [currentId, setCurrentId] = useState(null);
@@ -963,6 +964,19 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
           setNotice(st.length
             ? "MCP：" + st.map(s => `${s.name} ${!s.enabled ? "已禁用" : s.connected ? `已连接·${s.toolCount} 工具` : `未连接${s.error ? "（" + String(s.error).slice(0, 40) + "）" : "（回合开始时自动懒连接）"}`}`).join("；")
             : "未配置 MCP 服务器。在设置页「MCP 服务器」添加。");
+        }
+      } else if (cmd === "/memory") {
+        if (!memory || !memory.list) {
+          setNotice("全局记忆后端不可用");
+        } else {
+          const r = await memory.list({ limit: 15 });
+          setNotice(
+            r.count
+              ? `全局记忆共 ${r.count} 条（最近 ${r.memories.length}）：` +
+                  r.memories.map(m => `[${m.kind}] ${m.name}`).join("、") +
+                  "。完整内容/删除在设置页「全局记忆」。"
+              : "全局记忆为空。工作中遇到该长期记的东西（用户偏好/协作规则/项目约定/可复用教训），Agent 会 memory_save 存进来，你也可以直接说「记住：…」。"
+          );
         }
       } else {
         setNotice(`未知命令 ${cmd}——输入 / 弹出命令菜单，或 /help 查看全部`);

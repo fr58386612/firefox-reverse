@@ -15,7 +15,11 @@ import { renderMarkdown } from "./Markdown.jsx";
  */
 
 const TITLE = "Firefox-Reverse-Agent";
-const SYSTEM = `你是 firefox-reverse 浏览器内置的 JS 逆向与自动化助手，可调用工具直接操作浏览器：分析页面、自动点击/滑动/填表、抓包、搜代码、追踪加密/签名参数的生成算法。
+// 二开 M8：系统提示基底改由「Agent 能力档案」解析（store.getActiveAgentProfile()，
+// 内置逆向文本的单一来源在 ConfigStore.BUILTIN_REVERSE_PROFILE_TEXT）。
+// 下面旧常量已停用（无运行引用），文本本体已迁至 ConfigStore。
+// eslint-disable-next-line no-unused-vars
+const _RETIRED_SYSTEM_MOVED_TO_CONFIGSTORE = `你是 firefox-reverse 浏览器内置的 JS 逆向与自动化助手，可调用工具直接操作浏览器：分析页面、自动点击/滑动/填表、抓包、搜代码、追踪加密/签名参数的生成算法。
 
 工具清单与参数你已在 function 列表里看到，这里不重复；只给必须时刻记住的核心，**完整方法论调 \`skill_get\` 读全文**。
 
@@ -64,6 +68,23 @@ const ASSIST_BLOCK = `
 3. **只在「真分叉」才停下给选项**：你确实被卡死、或确有几条**实质不同**的路且判不准哪条好——这时调 \`offer_choices\` 把 2-3 个候选方向（含你的推荐）做成**可点击选项**交回用户，本轮随即结束。**严禁为了结束这一轮、为了跳出反复试的循环，就硬造一个分叉、硬下一个体面的「根因」来收尾。**
 4. **结论必须跟着你自己的证据走、不许自相矛盾**：写「根因/结论」前回看本轮自己的输出——你的日志若显示某步**成功了**，就不能写它「失败」；若是「补一个对象、报错就往后挪一步」，那是在**逼近**、不是「死路」。证据没指向某结论就别下，宁可写「还没定论，下一步具体做 X」然后接着做。
 5. 真拿不准、缺登录态/账号/验证码/纯业务决策，才停下问——辅助模式的价值是**用户帮你导航死路**，不是给你每轮找借口收尾。`;
+
+// 二开 M8：store 完全缺失时的兜底人设（真机上 ConfigStore 永远可用，仅防御）。
+const FALLBACK_SYSTEM = `你是 Firefox Reverse 浏览器内置的 AI 助手，可调用工具操作浏览器、读写工作目录、执行脚本验证。用中文回复；主动调工具拿证据而不是空想；结论要可落地。`;
+
+// 二开 M8：自定义能力档案（非内置逆向）使用的通用执行模式块——去掉逆向专属的
+// P0→P6 流水线与黑盒/白盒术语，只保留与能力无关的协作纪律。
+const GENERIC_AUTO_BLOCK = `
+
+【执行模式：全自动】按用户目标**自主推进到全部完成**再停：把目标拆成有序步骤，每完成一步简述"做了什么/得到什么/下一步"并立即继续；不要每步停下问"要不要继续"。只有两种情况结束本轮：① 真正需要用户提供拿不到的东西（登录态/账号/验证码/关键决策）；② 目标已全部完成。`;
+
+const GENERIC_ASSIST_BLOCK = `
+
+【执行模式：AI辅助（跟用户协作导航）】以**用户当前指令为最高优先**：
+1. 用户给了明确指令/方向时：照做、做到底、如实回报真实结果，别用「给你几个方向你选」的模板顶掉指令。
+2. 首轮或用户没给方向时：先给简短方案（步骤+预期产出），停下问从哪开始。
+3. 只在真分叉（被卡死/几条实质不同的路判不准）时调 \`offer_choices\` 给可点击选项；严禁硬造分叉或硬编体面结论来收尾。
+4. 结论必须与本轮自己的输出证据一致，不自相矛盾。`;
 
 // 内联 SVG 图标（stroke=currentColor，随主题/字色变化，比 emoji 清晰可控）
 const svgProps = {
@@ -325,6 +346,7 @@ const SLASH_COMMANDS = [
   { cmd: "/skills", desc: "列出可用技能（含启用/禁用状态）" },
   { cmd: "/mcp", desc: "查看 MCP 服务器连接状态与工具数" },
   { cmd: "/memory", desc: "查看全局记忆（跨任务的偏好/约定/教训，设置页管理）" },
+  { cmd: "/agent", desc: "查看/切换 Agent 能力档案（/agent 列表，/agent <名称> 切换）" },
   { cmd: "/help", desc: "显示全部可用命令" },
 ];
 
@@ -978,6 +1000,35 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
               : "全局记忆为空。工作中遇到该长期记的东西（用户偏好/协作规则/项目约定/可复用教训），Agent 会 memory_save 存进来，你也可以直接说「记住：…」。"
           );
         }
+      } else if (cmd === "/agent") {
+        if (!store || !store.listAgentProfiles) {
+          setNotice("能力档案后端不可用");
+        } else {
+          const profiles = store.listAgentProfiles();
+          let active = null;
+          try {
+            active = store.getActiveAgentProfile();
+          } catch {
+            /* 列表仍可用，只是标不出当前项 */
+          }
+          const arg = rest.join(" ").trim();
+          if (!arg) {
+            setNotice(
+              "能力档案共 " + profiles.length + " 个：" +
+                profiles.map(p => `${p.id === (active && active.id) ? "▶ " : "· "}${p.name}${p.builtin ? "（内置）" : ""}`).join("　") +
+                "。切换：/agent <名称>；新建/编辑/删除在设置页「Agent 设置」。"
+            );
+          } else {
+            const hit = profiles.find(p => p.name === arg) ||
+              profiles.find(p => p.name.toLowerCase() === arg.toLowerCase());
+            if (!hit) {
+              setNotice(`没有找到能力档案「${arg}」。现有：${profiles.map(p => p.name).join("、")}`);
+            } else {
+              store.setActiveAgentProfileId(hit.id);
+              setNotice(`已切换 Agent 能力档案为「${hit.name}」${hit.builtin ? "（内置）" : ""}——下一条消息起按该档案的系统提示工作。`);
+            }
+          }
+        }
       } else {
         setNotice(`未知命令 ${cmd}——输入 / 弹出命令菜单，或 /help 查看全部`);
       }
@@ -1030,7 +1081,17 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
       // Stable provider-cache prefix: only invariant policy stays in system.
       // Workspace, notes, and Skill catalog are attached to the current user
       // message by AgentLoop as dynamic context.
-      let sys = SYSTEM +
+      // 二开 M8：系统提示基底由「Agent 能力档案」决定——内置档案=原逆向人设（行为零变化），
+      // 自定义档案=用户自己定义的能力提示。store 异常时回退 FALLBACK_SYSTEM，绝不因取档案失败断发。
+      let prof = null;
+      try {
+        if (store && store.getActiveAgentProfile) {
+          prof = store.getActiveAgentProfile();
+        }
+      } catch {
+        prof = null;
+      }
+      let sys = ((prof && prof.system) || FALLBACK_SYSTEM) +
         "\n\n【浏览器环境】环境隔离、指纹配置和 MCP 指定环境由 env_* 工具链处理；Agent 对话页不做环境选择。";
       const dynamicParts = [
         workspaceDir
@@ -1066,7 +1127,11 @@ export default function AgentPanel({ buildClient, conversations, store, router, 
           /* 持久化失败不影响本会话内生效 */
         }
       }
-      sys += effMode === "assist" ? ASSIST_BLOCK : AUTO_BLOCK;
+      // 二开 M8：内置逆向档案继续用逆向专属模式块（P0→P6 流水线等，行为零变化）；
+      // 自定义能力档案用通用模式块——不含逆向黑话，纪律与能力无关。
+      sys += prof && !prof.builtin
+        ? (effMode === "assist" ? GENERIC_ASSIST_BLOCK : GENERIC_AUTO_BLOCK)
+        : (effMode === "assist" ? ASSIST_BLOCK : AUTO_BLOCK);
       try {
         const dg = notes && notes.digest ? await notes.digest({}) : "";
         if (dg) {

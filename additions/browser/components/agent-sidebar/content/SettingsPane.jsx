@@ -136,6 +136,80 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, memor
     }
   }
 
+  // 二开 M8：Agent 设置——能力档案。内置「JS 逆向与自动化」由代码合成、只读（可复制成自定义）；
+  // 自定义档案用用户文本直接当系统提示，定义 Agent 的其他能力。切换对下一条消息生效。
+  const [agentProfiles, setAgentProfiles] = useState(() =>
+    store.listAgentProfiles ? store.listAgentProfiles() : []);
+  const [activeAgentId, setActiveAgentId] = useState(() => {
+    try {
+      return store.getActiveAgentProfile ? (store.getActiveAgentProfile() || {}).id || "" : "";
+    } catch {
+      return "";
+    }
+  });
+  const [apMsg, setApMsg] = useState("");
+  // null=表单收起；{id:"" 新建 | 自定义档案 id, name, description, system}
+  const [apForm, setApForm] = useState(null);
+  function refreshAgentProfiles(preferActive) {
+    if (!store.listAgentProfiles) return;
+    setAgentProfiles(store.listAgentProfiles());
+    if (preferActive) setActiveAgentId(preferActive);
+  }
+  function chooseAgentProfile(id) {
+    setApMsg("");
+    try {
+      store.setActiveAgentProfileId(id);
+      setActiveAgentId(id);
+      const p = agentProfiles.find(x => x.id === id);
+      setApMsg(`已启用「${p ? p.name : id}」——下一条消息起按该档案的系统提示工作。`);
+    } catch (e) {
+      setApMsg("切换失败：" + ((e && e.message) || e));
+    }
+  }
+  function startDuplicateAgentProfile(p) {
+    setApMsg("");
+    try {
+      const created = store.duplicateAgentProfile(p.id);
+      refreshAgentProfiles();
+      setApForm({ id: created.id, name: created.name, description: created.description || "", system: created.system });
+      setApMsg("已复制为自定义档案，可直接编辑。");
+    } catch (e) {
+      setApMsg("复制失败：" + ((e && e.message) || e));
+    }
+  }
+  function saveAgentProfile() {
+    if (!apForm) return;
+    setApMsg("");
+    try {
+      let p;
+      if (apForm.id) {
+        p = store.updateAgentProfile(apForm.id, { name: apForm.name, description: apForm.description, system: apForm.system });
+        setApForm(null);
+        refreshAgentProfiles();
+        setApMsg(`已保存「${p.name}」。`);
+      } else {
+        p = store.createAgentProfile({ name: apForm.name, description: apForm.description, system: apForm.system });
+        store.setActiveAgentProfileId(p.id); // 新建即启用：用户的意图就是要用这个新能力
+        setApForm(null);
+        refreshAgentProfiles(p.id);
+        setApMsg(`已保存并启用「${p.name}」——下一条消息起生效。`);
+      }
+    } catch (e) {
+      setApMsg("保存失败：" + ((e && e.message) || e));
+    }
+  }
+  function deleteAgentProfile(p) {
+    setApMsg("");
+    try {
+      store.deleteAgentProfile(p.id);
+      if (activeAgentId === p.id) setActiveAgentId("ap_reverse");
+      refreshAgentProfiles();
+      setApMsg(`已删除「${p.name}」。`);
+    } catch (e) {
+      setApMsg("删除失败：" + ((e && e.message) || e));
+    }
+  }
+
   function refreshProfiles(preferId) {
     if (!store.listModelProfiles) return;
     const next = store.listModelProfiles();
@@ -501,6 +575,57 @@ export default function SettingsPane({ store, providers, fetchModels, mcp, memor
             {memMsg && <span className="settings-pane__saved">{memMsg}</span>}
           </div>
           <span className="settings-pane__hint">记忆存于本 profile（global-memory.json），所有任务/站点共享；过时的及时删。</span>
+        </section>
+      )}
+
+      {store.listAgentProfiles && (
+        <section className="settings-pane__section">
+          <div className="settings-pane__section-title">Agent 设置（能力档案 · {agentProfiles.length} 个）</div>
+          <span className="settings-pane__hint">
+            能力档案决定 Agent 的系统提示：默认是内置「JS 逆向与自动化」；可新建档案定义其它能力
+            （翻译、写作、数据分析、领域顾问……），Agent 会照你写的定义行事。切换/保存后下一条消息生效。
+          </span>
+          {agentProfiles.map(p => (
+            <div key={p.id} className="settings-pane__memrow" style={p.id === activeAgentId ? { background: "rgba(128, 128, 128, .08)", borderRadius: 6 } : undefined}>
+              <div className="settings-pane__memrow-main">
+                <div className="settings-pane__memrow-name">{p.id === activeAgentId ? "▶ " : ""}{p.name}{p.builtin ? "（内置）" : ""}</div>
+                {p.description ? <div className="settings-pane__memrow-body">{p.description}</div> : null}
+                <div className="settings-pane__memrow-body">{p.system.length > 120 ? p.system.slice(0, 120) + "…" : p.system}</div>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, flexShrink: 0 }}>
+                {p.id !== activeAgentId && <button type="button" onClick={() => chooseAgentProfile(p.id)}>启用</button>}
+                <button type="button" onClick={() => startDuplicateAgentProfile(p)}>{p.builtin ? "复制为自定义" : "复制"}</button>
+                {!p.builtin && <button type="button" onClick={() => setApForm({ id: p.id, name: p.name, description: p.description || "", system: p.system })}>编辑</button>}
+                {!p.builtin && <button type="button" onClick={() => deleteAgentProfile(p)} title="删除该自定义档案">删除</button>}
+              </div>
+            </div>
+          ))}
+          {apForm ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+              <label className="settings-pane__field">
+                名称
+                <input type="text" value={apForm.name} placeholder="例如：英中技术文档翻译" onChange={e => setApForm({ ...apForm, name: e.target.value })} />
+              </label>
+              <label className="settings-pane__field">
+                一句话说明（可选）
+                <input type="text" value={apForm.description} placeholder="这个档案让 Agent 做什么" onChange={e => setApForm({ ...apForm, description: e.target.value })} />
+              </label>
+              <label className="settings-pane__field">
+                能力定义（系统提示，至少 10 个字——这就是给 Agent 的人设与规矩）
+                <textarea className="settings-pane__mcpjson" rows={8} value={apForm.system} placeholder={"你是…（角色/目标）\n工作要求：…（步骤、产出格式、边界）"} onChange={e => setApForm({ ...apForm, system: e.target.value })} />
+              </label>
+              <div className="settings-pane__actions">
+                <button type="button" onClick={saveAgentProfile}>{apForm.id ? "保存修改" : "保存并启用"}</button>
+                <button type="button" className="settings-pane__btn-ghost" onClick={() => setApForm(null)}>取消</button>
+              </div>
+            </div>
+          ) : (
+            <div className="settings-pane__actions">
+              <button type="button" onClick={() => { setApMsg(""); setApForm({ id: "", name: "", description: "", system: "" }); }}>新建能力档案</button>
+              {apMsg && <span className="settings-pane__saved">{apMsg}</span>}
+            </div>
+          )}
+          {apForm && apMsg && <div className="settings-pane__actions"><span className="settings-pane__saved">{apMsg}</span></div>}
         </section>
       )}
 
